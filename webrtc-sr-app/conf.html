@@ -6,6 +6,10 @@
     <title>Hackathon Video Demo</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', sans-serif; }
@@ -72,6 +76,7 @@
                     <div class="video-wrapper">
                          <video id="localVideo" autoplay playsinline muted></video>
                          <canvas id="senderPatchOverlay" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 6;"></canvas>
+                         <canvas id="faceDetectionCanvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 7;"></canvas>
                     </div>
                 </div>
             </div>
@@ -111,6 +116,13 @@
                         <span class="font-medium">Blocky Background:</span>
                         <label class="switch">
                             <input type="checkbox" id="blockyToggle" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="font-medium">Face Detection:</span>
+                        <label class="switch">
+                            <input type="checkbox" id="faceDetectionToggle">
                             <span class="slider"></span>
                         </label>
                     </div>
@@ -173,7 +185,10 @@
         const patchZoomSlider = document.getElementById('patchZoomSlider');
         const patchZoomValue = document.getElementById('patchZoomValue');
         const blockyToggle = document.getElementById('blockyToggle');
+        const faceDetectionToggle = document.getElementById('faceDetectionToggle');
         const captureCanvas = document.getElementById('captureCanvas');
+        const faceDetectionCanvas = document.getElementById('faceDetectionCanvas');
+        const faceDetectionCtx = faceDetectionCanvas.getContext('2d');
         
         // Bitrate monitoring elements
         const videoBitrateDiv = document.getElementById('videoBitrate');
@@ -213,6 +228,12 @@
         let srSessionActive = false; // Track if SR is currently active
         let lastSRDataTime = 0; // Timestamp of last SR data received
         const SR_TIMEOUT = 3000; // 3 seconds timeout for SR session
+        
+        // MediaPipe Face Detection variables
+        let faceDetection = null;
+        let faceDetectionActive = false;
+        let detectedFaces = [];
+        let faceDetectionInterval = null;
         
         const socket = io(SIGNALING_SERVER_URL);
         const roomName = 'hackathon-room-sr';
@@ -902,6 +923,128 @@
         // Start timeout checker
         setInterval(checkSRTimeout, 1000); // Check every second
 
+        // --- MEDIAPIPE FACE DETECTION ---
+        function initializeFaceDetection() {
+            if (typeof FaceDetection === 'undefined') {
+                console.warn('⚠️ [FACE_DETECTION] MediaPipe not available');
+                return;
+            }
+
+            faceDetection = new FaceDetection({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`;
+                }
+            });
+
+            faceDetection.setOptions({
+                model: 'short',
+                minDetectionConfidence: 0.5,
+            });
+
+            faceDetection.onResults(onFaceDetectionResults);
+            console.log('✅ [FACE_DETECTION] MediaPipe initialized');
+        }
+
+        function onFaceDetectionResults(results) {
+            detectedFaces = results.detections || [];
+            
+            if (faceDetectionActive) {
+                drawFaceDetectionOverlay();
+            }
+        }
+
+        function drawFaceDetectionOverlay() {
+            // Match canvas size to video
+            faceDetectionCanvas.width = localVideo.clientWidth;
+            faceDetectionCanvas.height = localVideo.clientHeight;
+            
+            // Clear previous drawings
+            faceDetectionCtx.clearRect(0, 0, faceDetectionCanvas.width, faceDetectionCanvas.height);
+            
+            if (detectedFaces.length > 0) {
+                const videoWidth = localVideo.videoWidth || localVideo.clientWidth;
+                const videoHeight = localVideo.videoHeight || localVideo.clientHeight;
+                
+                detectedFaces.forEach((detection, index) => {
+                    const bbox = detection.boundingBox;
+                    
+                    // Convert normalized coordinates to canvas coordinates
+                    const x = bbox.xCenter * faceDetectionCanvas.width - (bbox.width * faceDetectionCanvas.width) / 2;
+                    const y = bbox.yCenter * faceDetectionCanvas.height - (bbox.height * faceDetectionCanvas.height) / 2;
+                    const width = bbox.width * faceDetectionCanvas.width;
+                    const height = bbox.height * faceDetectionCanvas.height;
+                    
+                    // Draw bounding box
+                    faceDetectionCtx.strokeStyle = '#00ff88';
+                    faceDetectionCtx.lineWidth = 3;
+                    faceDetectionCtx.strokeRect(x, y, width, height);
+                    
+                    // Draw label
+                    faceDetectionCtx.fillStyle = '#00ff88';
+                    faceDetectionCtx.font = '16px Arial';
+                    faceDetectionCtx.fillText(`Face ${index + 1} (${(detection.score * 100).toFixed(0)}%)`, 
+                                             x, y - 10);
+                    
+                    console.log(`👤 [FACE_DETECTED] Face ${index + 1} at (${x.toFixed(0)}, ${y.toFixed(0)}) size ${width.toFixed(0)}x${height.toFixed(0)}`);
+                });
+            }
+        }
+
+        async function startFaceDetection() {
+            if (!faceDetection) {
+                initializeFaceDetection();
+                
+                // Wait a moment for initialization
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            
+            if (!faceDetection) {
+                console.error('❌ [FACE_DETECTION] Failed to initialize MediaPipe');
+                return;
+            }
+            
+            faceDetectionActive = true;
+            
+            // Create a temporary canvas for MediaPipe processing
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            
+            faceDetectionInterval = setInterval(async () => {
+                if (!faceDetectionActive || !localVideo.videoWidth || !localVideo.videoHeight) return;
+                
+                try {
+                    // Set canvas size to video dimensions
+                    tempCanvas.width = localVideo.videoWidth;
+                    tempCanvas.height = localVideo.videoHeight;
+                    
+                    // Draw the video frame to the canvas
+                    tempCtx.drawImage(localVideo, 0, 0, localVideo.videoWidth, localVideo.videoHeight);
+                    
+                    // Send the canvas to MediaPipe instead of the video element
+                    await faceDetection.send({ image: tempCanvas });
+                } catch (error) {
+                    console.error('❌ [FACE_DETECTION] Processing error:', error);
+                }
+            }, 100); // Process at ~10 FPS
+            
+            console.log('🔍 [FACE_DETECTION] Started');
+        }
+
+        function stopFaceDetection() {
+            faceDetectionActive = false;
+            
+            if (faceDetectionInterval) {
+                clearInterval(faceDetectionInterval);
+                faceDetectionInterval = null;
+            }
+            
+            // Clear the overlay
+            faceDetectionCtx.clearRect(0, 0, faceDetectionCanvas.width, faceDetectionCanvas.height);
+            detectedFaces = [];
+            
+            console.log('🔍 [FACE_DETECTION] Stopped');
+        }
+
         // --- 5. BANDWIDTH THROTTLING ---
         setBitrateButton.onclick = setBandwidth;
         function setBandwidth() {
@@ -934,6 +1077,17 @@
                 if (!srSessionActive) {
                     clearPatchCanvas();
                 }
+            }
+        });
+        
+        // --- FACE DETECTION CONTROL ---
+        faceDetectionToggle.addEventListener('change', () => {
+            console.log(`👤 [FACE_DETECTION] Face detection: ${faceDetectionToggle.checked ? 'ON' : 'OFF'}`);
+            
+            if (faceDetectionToggle.checked) {
+                startFaceDetection();
+            } else {
+                stopFaceDetection();
             }
         });
         function updatePatchSize() {
