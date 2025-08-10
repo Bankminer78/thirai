@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thirai RTC - Video Calling Platform</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="landing-page" class="container">
+        <div class="landing-content">
+            <h1>Thirai RTC</h1>
+            <p>Advanced video calling with face super-resolution</p>
+            
+            <div class="form-group">
+                <input type="text" id="user-name" placeholder="Enter your name" required>
+                <button id="join-call" onclick="joinCall()">Join Call</button>
+            </div>
+            
+            <div class="room-info">
+                <p>Room ID: <span id="room-id"></span></p>
+            </div>
+        </div>
+    </div>
+
+    <div id="call-page" class="container hidden">
+        <div class="call-header">
+            <h2>Thirai RTC Call</h2>
+            <div class="user-info">
+                <span id="current-user"></span> in room <span id="current-room"></span>
+            </div>
+        </div>
+
+        <div class="video-container">
+            <div class="local-video-wrapper">
+                <video id="local-video" autoplay muted playsinline></video>
+                <canvas id="local-canvas" class="hidden"></canvas>
+                <div class="video-label">You</div>
+            </div>
+            
+            <div id="remote-videos" class="remote-videos"></div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="sr-toggle"> Enable Face Super-Resolution
+                </label>
+            </div>
+
+            <div class="control-group">
+                <label for="bandwidth-throttle">Bandwidth Throttle:</label>
+                <input type="range" id="bandwidth-throttle" min="50" max="2000" value="1000" step="50">
+                <span id="bandwidth-value">1000 kbps</span>
+            </div>
+
+            <div class="control-group">
+                <button id="toggle-video" onclick="toggleVideo()">📹 Video</button>
+                <button id="toggle-audio" onclick="toggleAudio()">🎤 Audio</button>
+                <button id="leave-call" onclick="leaveCall()">📞 Leave</button>
+            </div>
+        </div>
+
+        <div class="status">
+            <div id="connection-status">Connecting...</div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="js/webrtc.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

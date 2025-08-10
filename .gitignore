@@ -1,0 +1,17 @@
+# Only track Python source files (and this .gitignore)
+# Ignore everything at root
+/*
+# Re-allow traversing into subdirectories
+!/**/
+# Allow Python files anywhere
+!**/*.py
+# Keep this file
+!.gitignore
+
+.venv/
+venv/
+.venv-coreml311/
+
+myface_ds/
+node_modules
+output/
