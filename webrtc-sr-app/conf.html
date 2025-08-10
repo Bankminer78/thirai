@@ -113,6 +113,16 @@
                         <input type="range" id="patchZoomSlider" min="0.5" max="3.0" value="1.0" step="0.1" class="bg-gray-700">
                         <span id="patchZoomValue" class="text-sm text-gray-300 w-12">1.0x</span>
                     </div>
+                    <div class="flex items-center gap-2">
+                        <label for="facePatchFpsSlider" class="font-medium">Face FPS:</label>
+                        <input type="range" id="facePatchFpsSlider" min="0.1" max="2.0" value="0.5" step="0.1" class="bg-gray-700">
+                        <span id="facePatchFpsValue" class="text-sm text-gray-300 w-12">0.5</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <label for="faceQualitySlider" class="font-medium">Face Quality:</label>
+                        <input type="range" id="faceQualitySlider" min="0.3" max="0.9" value="0.8" step="0.1" class="bg-gray-700">
+                        <span id="faceQualityValue" class="text-sm text-gray-300 w-12">80%</span>
+                    </div>
                     <div class="flex items-center gap-3">
                         <span class="font-medium">Blocky Background:</span>
                         <label class="switch">
@@ -195,6 +205,10 @@
         const blockyToggle = document.getElementById('blockyToggle');
         const faceDetectionToggle = document.getElementById('faceDetectionToggle');
         const facePatchToggle = document.getElementById('facePatchToggle');
+        const facePatchFpsSlider = document.getElementById('facePatchFpsSlider');
+        const facePatchFpsValue = document.getElementById('facePatchFpsValue');
+        const faceQualitySlider = document.getElementById('faceQualitySlider');
+        const faceQualityValue = document.getElementById('faceQualityValue');
         const captureCanvas = document.getElementById('captureCanvas');
         const faceDetectionCanvas = document.getElementById('faceDetectionCanvas');
         const faceDetectionCtx = faceDetectionCanvas.getContext('2d');
@@ -226,6 +240,9 @@
         // Face patch variables (declare early to avoid temporal dead zone)
         let facePatchCanvas = null; // Canvas for rendering received face patches
         let facePatchCtx = null; // Context for face patch canvas
+        let lastFacePatchTime = 0; // Timestamp of last face patch sent
+        let facePatchFPS = 0.5; // Face patch framerate (0.5 = 1 patch every 2 seconds)
+        let faceJPEGQuality = 0.8; // JPEG compression quality (0.3-0.9)
         
         // Enhanced bitrate tracking variables
         let bitrateMonitorInterval = null;
@@ -1179,6 +1196,17 @@
             
             if (detectedFaces.length === 0) return;
             
+            // Throttle face patch framerate to reduce bandwidth
+            const now = Date.now();
+            const timeSinceLastPatch = now - lastFacePatchTime;
+            const minInterval = 1000 / facePatchFPS; // Convert FPS to milliseconds
+            
+            if (timeSinceLastPatch < minInterval) {
+                return; // Skip this frame
+            }
+            
+            lastFacePatchTime = now;
+            
             // Get video dimensions
             const videoWidth = localVideo.videoWidth || localVideo.clientWidth;
             const videoHeight = localVideo.videoHeight || localVideo.clientHeight;
@@ -1228,8 +1256,8 @@
                     0, 0, patchSize, patchSize                        // destination rectangle
                 );
                 
-                // Convert to JPEG (with compression)
-                const jpegDataUrl = tempCanvas.toDataURL('image/jpeg', 0.8); // 80% quality
+                // Convert to JPEG (with dynamic compression quality)
+                const jpegDataUrl = tempCanvas.toDataURL('image/jpeg', faceJPEGQuality);
                 const jpegBase64 = jpegDataUrl.split(',')[1]; // Remove data URL prefix
                 
                 // Create face patch message
@@ -1280,6 +1308,12 @@
         
         // --- PATCH ZOOM CONTROL ---
         patchZoomSlider.addEventListener('input', updatePatchZoom);
+        
+        // --- FACE PATCH FPS CONTROL ---
+        facePatchFpsSlider.addEventListener('input', updateFacePatchFPS);
+        
+        // --- FACE JPEG QUALITY CONTROL ---
+        faceQualitySlider.addEventListener('input', updateFaceQuality);
         
         // --- BLOCKY BACKGROUND CONTROL ---
         blockyToggle.addEventListener('change', () => {
@@ -1388,6 +1422,21 @@
                     height: zoomedSize
                 };
             }
+        }
+        
+        function updateFacePatchFPS() {
+            facePatchFPS = parseFloat(facePatchFpsSlider.value);
+            facePatchFpsValue.textContent = facePatchFPS.toFixed(1);
+            
+            console.log(`🎭 [FACE_PATCH_FPS] Updated to: ${facePatchFPS} FPS`);
+        }
+        
+        function updateFaceQuality() {
+            faceJPEGQuality = parseFloat(faceQualitySlider.value);
+            const percentage = Math.round(faceJPEGQuality * 100);
+            faceQualityValue.textContent = percentage + '%';
+            
+            console.log(`📸 [FACE_QUALITY] Updated to: ${percentage}% (${faceJPEGQuality})`);
         }
 
         // --- BLOCKY BACKGROUND EFFECT ---
