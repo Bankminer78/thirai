@@ -97,6 +97,16 @@
                         <input type="range" id="patchSizeSlider" min="200" max="600" value="413" class="bg-gray-700">
                         <span id="patchSizeValue" class="text-sm text-gray-300 w-12">413px</span>
                     </div>
+                    <div class="flex items-center gap-2">
+                        <label for="srFpsSlider" class="font-medium">SR FPS:</label>
+                        <input type="range" id="srFpsSlider" min="0.5" max="10" value="1" step="0.5" class="bg-gray-700">
+                        <span id="srFpsValue" class="text-sm text-gray-300 w-12">1.0</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <label for="patchZoomSlider" class="font-medium">Patch Zoom:</label>
+                        <input type="range" id="patchZoomSlider" min="0.5" max="3.0" value="1.0" step="0.1" class="bg-gray-700">
+                        <span id="patchZoomValue" class="text-sm text-gray-300 w-12">1.0x</span>
+                    </div>
                     <div class="flex items-center gap-3">
                         <span class="font-medium">Blocky Background:</span>
                         <label class="switch">
@@ -158,6 +168,10 @@
         const srToggle = document.getElementById('srToggle');
         const patchSizeSlider = document.getElementById('patchSizeSlider');
         const patchSizeValue = document.getElementById('patchSizeValue');
+        const srFpsSlider = document.getElementById('srFpsSlider');
+        const srFpsValue = document.getElementById('srFpsValue');
+        const patchZoomSlider = document.getElementById('patchZoomSlider');
+        const patchZoomValue = document.getElementById('patchZoomValue');
         const blockyToggle = document.getElementById('blockyToggle');
         const captureCanvas = document.getElementById('captureCanvas');
         
@@ -180,6 +194,8 @@
         let dataChannel;
         let srLoopInterval = null;
         let currentPatchSize = 413; // Dynamic patch size
+        let currentSRFPS = 1.0; // Dynamic SR FPS
+        let currentPatchZoom = 1.0; // Dynamic patch zoom factor
         
         // Enhanced bitrate tracking variables
         let bitrateMonitorInterval = null;
@@ -194,6 +210,9 @@
         // SR patch persistence
         let lastSRPatch = null; // Store the last decoded SR patch
         let lastSRPatchPosition = null; // Store patch position
+        let srSessionActive = false; // Track if SR is currently active
+        let lastSRDataTime = 0; // Timestamp of last SR data received
+        const SR_TIMEOUT = 3000; // 3 seconds timeout for SR session
         
         const socket = io(SIGNALING_SERVER_URL);
         const roomName = 'hackathon-room-sr';
@@ -424,7 +443,22 @@
                 
                 statusDiv.innerText = 'Super Resolution ON.';
                 showSenderPatchOverlay();
-                srLoopInterval = setInterval(senderSRLoop, 1000 / SR_FPS);
+                srLoopInterval = setInterval(senderSRLoop, 1000 / currentSRFPS);
+                
+                // Set local SR session state for sender
+                srSessionActive = true;
+                lastSRDataTime = Date.now();
+                
+                // Send SR session start message to receiver
+                if (dataChannel && dataChannel.readyState === 'open') {
+                    const controlMessage = {
+                        type: 'sr_control',
+                        action: 'start',
+                        timestamp: Date.now()
+                    };
+                    dataChannel.send(JSON.stringify(controlMessage));
+                    console.log('📡 [SR_CONTROL] Sent SR START message to receiver');
+                }
                 
                 // Force one immediate attempt to help with debugging
                 setTimeout(() => {
@@ -437,6 +471,17 @@
                 clearInterval(srLoopInterval);
                 srLoopInterval = null;
                 
+                // Send SR session stop message to receiver
+                if (dataChannel && dataChannel.readyState === 'open') {
+                    const controlMessage = {
+                        type: 'sr_control',
+                        action: 'stop',
+                        timestamp: Date.now()
+                    };
+                    dataChannel.send(JSON.stringify(controlMessage));
+                    console.log('📡 [SR_CONTROL] Sent SR STOP message to receiver');
+                }
+                
                 // Reset SR tracking
                 srDataTransferred = 0;
                 lastSrBytes = 0;
@@ -444,6 +489,7 @@
                 // Clear stored SR patch
                 lastSRPatch = null;
                 lastSRPatchPosition = null;
+                srSessionActive = false;
             }
         };
         
@@ -615,6 +661,9 @@
                     const messageSize = messageStr.length;
                     srDataTransferred += messageSize;
                     
+                    // Update sender's SR session state
+                    lastSRDataTime = Date.now();
+                    
                     statusDiv.innerText = `📡 Latent sent in ${Math.round(encodeTime)}ms (VAE: ${encodeResult.encode_time_ms}ms)`;
                     console.log('📡 [SENDER] Latent vector sent via data channel:', {
                         message_size_bytes: messageSize,
@@ -642,16 +691,30 @@
         }
 
         async function handleDataChannelMessage(event) {
-            const latentMessage = JSON.parse(event.data);
+            const message = JSON.parse(event.data);
+            
+            // Handle different message types
+            if (message.type === 'sr_control') {
+                handleSRControlMessage(message);
+                return;
+            }
+            
+            // Handle SR latent data (legacy format without type field)
+            const latentMessage = message;
             
             // Track received SR data for bitrate monitoring
             const messageSize = event.data.length;
             srDataTransferred += messageSize;
             
+            // Update SR session state
+            srSessionActive = true;
+            lastSRDataTime = Date.now();
+            
             console.log('🎯 [RECEIVER] Received latent message:', {
                 latent_b64_length: latentMessage.latent_b64?.length || 0,
                 message_size_bytes: messageSize,
                 total_sr_data_received: srDataTransferred,
+                sr_session_active: srSessionActive,
                 serialization: 'numpy.save format (preserves all metadata)'
             });
             
@@ -705,12 +768,14 @@
                 const patchSize = currentPatchSize; // This is the desired display size
                 
                 // Position the patch at the center of the canvas (matching sender's relative position)
-                const patchCanvasX = (patchCanvas.width - patchSize) / 2;
-                const patchCanvasY = (patchCanvas.height - patchSize) / 2;
+                const baseSize = patchSize;
+                const zoomedSize = baseSize * currentPatchZoom;
+                const patchCanvasX = (patchCanvas.width - zoomedSize) / 2;
+                const patchCanvasY = (patchCanvas.height - zoomedSize) / 2;
                 
-                // The patch keeps its native 256x256 size - no scaling needed!
-                const patchCanvasWidth = patchSize;
-                const patchCanvasHeight = patchSize;
+                // Apply zoom to the patch display size
+                const patchCanvasWidth = zoomedSize;
+                const patchCanvasHeight = zoomedSize;
                 
                 console.log('🖼️ [RECEIVER] Patching decoded image:', {
                     canvas_size: `${patchCanvas.width}x${patchCanvas.height}`,
@@ -774,6 +839,69 @@
             }
         }
 
+        // --- SR CONTROL MESSAGE HANDLING ---
+        function handleSRControlMessage(message) {
+            console.log('🎛️ [SR_CONTROL] Received control message:', message);
+            
+            if (message.action === 'start') {
+                srSessionActive = true;
+                lastSRDataTime = Date.now();
+                statusDiv.innerText = '🔥 Super Resolution session started';
+                console.log('✅ [SR_SESSION] SR session STARTED');
+                
+            } else if (message.action === 'stop') {
+                srSessionActive = false;
+                lastSRDataTime = 0;
+                
+                // Clear stored SR patches (but keep blocky background if enabled)
+                lastSRPatch = null;
+                lastSRPatchPosition = null;
+                
+                // Only clear canvas if blocky background is also disabled
+                if (!blockyToggle.checked) {
+                    clearPatchCanvas();
+                }
+                
+                statusDiv.innerText = '❌ Super Resolution session ended';
+                console.log('🔴 [SR_SESSION] SR session STOPPED - cleared SR patches');
+            }
+        }
+        
+        function clearPatchCanvas() {
+            if (patchCanvas && patchCtx) {
+                patchCtx.clearRect(0, 0, patchCanvas.width, patchCanvas.height);
+                console.log('🧹 [PATCH_CANVAS] Canvas cleared');
+            }
+        }
+        
+        // Check for SR session timeout
+        function checkSRTimeout() {
+            if (srSessionActive && lastSRDataTime > 0) {
+                const timeSinceLastData = Date.now() - lastSRDataTime;
+                
+                if (timeSinceLastData > SR_TIMEOUT) {
+                    console.log(`⏰ [SR_TIMEOUT] No SR data for ${timeSinceLastData}ms, ending session`);
+                    
+                    // Timeout detected - end SR session
+                    srSessionActive = false;
+                    lastSRPatch = null;
+                    lastSRPatchPosition = null;
+                    
+                    // Only clear canvas if blocky background is disabled
+                    if (!blockyToggle.checked) {
+                        clearPatchCanvas();
+                    }
+                    
+                    if (userRole === 'receiver') {
+                        statusDiv.innerText = '⏰ SR session timed out';
+                    }
+                }
+            }
+        }
+        
+        // Start timeout checker
+        setInterval(checkSRTimeout, 1000); // Check every second
+
         // --- 5. BANDWIDTH THROTTLING ---
         setBitrateButton.onclick = setBandwidth;
         function setBandwidth() {
@@ -791,13 +919,21 @@
         // --- 6. PATCH SIZE CONTROL ---
         patchSizeSlider.addEventListener('input', updatePatchSize);
         
+        // --- SR FPS CONTROL ---
+        srFpsSlider.addEventListener('input', updateSRFPS);
+        
+        // --- PATCH ZOOM CONTROL ---
+        patchZoomSlider.addEventListener('input', updatePatchZoom);
+        
         // --- BLOCKY BACKGROUND CONTROL ---
         blockyToggle.addEventListener('change', () => {
             console.log(`🎨 [BLOCKY] Blocky background: ${blockyToggle.checked ? 'ON' : 'OFF'}`);
             
-            if (!blockyToggle.checked && userRole === 'receiver') {
-                // Clear the canvas to show original video
-                patchCtx.clearRect(0, 0, patchCanvas.width, patchCanvas.height);
+            if (!blockyToggle.checked) {
+                // Clear the canvas immediately when blocky is turned off (unless SR session is active)
+                if (!srSessionActive) {
+                    clearPatchCanvas();
+                }
             }
         });
         function updatePatchSize() {
@@ -807,6 +943,41 @@
             // Update sender overlay if active
             if (userRole === 'sender' && srToggle.checked) {
                 showSenderPatchOverlay();
+            }
+        }
+        
+        function updateSRFPS() {
+            currentSRFPS = parseFloat(srFpsSlider.value);
+            srFpsValue.textContent = currentSRFPS.toFixed(1);
+            
+            console.log(`⚡ [SR_FPS] Updated to: ${currentSRFPS} FPS`);
+            
+            // Restart SR loop with new FPS if active
+            if (userRole === 'sender' && srToggle.checked && srLoopInterval) {
+                clearInterval(srLoopInterval);
+                srLoopInterval = setInterval(senderSRLoop, 1000 / currentSRFPS);
+            }
+        }
+        
+        function updatePatchZoom() {
+            currentPatchZoom = parseFloat(patchZoomSlider.value);
+            patchZoomValue.textContent = currentPatchZoom.toFixed(1) + 'x';
+            
+            console.log(`🔍 [PATCH_ZOOM] Updated to: ${currentPatchZoom}x`);
+            
+            // Update stored SR patch position if we have one
+            if (lastSRPatch && lastSRPatchPosition) {
+                const baseSize = currentPatchSize;
+                const zoomedSize = baseSize * currentPatchZoom;
+                const canvasWidth = patchCanvas.width;
+                const canvasHeight = patchCanvas.height;
+                
+                lastSRPatchPosition = {
+                    x: (canvasWidth - zoomedSize) / 2,
+                    y: (canvasHeight - zoomedSize) / 2,
+                    width: zoomedSize,
+                    height: zoomedSize
+                };
             }
         }
 
@@ -843,17 +1014,18 @@
             backgroundRenderInterval = setInterval(() => {
                 if (!remoteVideo.videoWidth || !remoteVideo.videoHeight) return;
                 
-                // Only render if blocky mode is on
+                // Always render blocky background if toggle is on (regardless of SR session)
                 if (blockyToggle.checked) {
                     patchCanvas.width = remoteVideo.clientWidth;
                     patchCanvas.height = remoteVideo.clientHeight;
                     
                     // Calculate patch area (even if no SR is active, show where it would be)
-                    const patchSize = currentPatchSize;
-                    const patchCanvasX = (patchCanvas.width - patchSize) / 2;
-                    const patchCanvasY = (patchCanvas.height - patchSize) / 2;
+                    const baseSize = currentPatchSize;
+                    const zoomedSize = baseSize * currentPatchZoom;
+                    const patchCanvasX = (patchCanvas.width - zoomedSize) / 2;
+                    const patchCanvasY = (patchCanvas.height - zoomedSize) / 2;
                     
-                    drawBlockyBackground(patchCtx, patchCanvas.width, patchCanvas.height, patchCanvasX, patchCanvasY, patchSize, patchSize);
+                    drawBlockyBackground(patchCtx, patchCanvas.width, patchCanvas.height, patchCanvasX, patchCanvasY, zoomedSize, zoomedSize);
                     
                     // If we have a stored SR patch, redraw it on top of the blocky background
                     if (lastSRPatch && lastSRPatchPosition) {
@@ -873,8 +1045,11 @@
                         // Draw patch area indicator (subtle outline) if no SR patch
                         patchCtx.strokeStyle = 'rgba(0, 255, 136, 0.3)';
                         patchCtx.lineWidth = 1;
-                        patchCtx.strokeRect(patchCanvasX, patchCanvasY, patchSize, patchSize);
+                        patchCtx.strokeRect(patchCanvasX, patchCanvasY, zoomedSize, zoomedSize);
                     }
+                } else {
+                    // Clear canvas when blocky toggle is off
+                    clearPatchCanvas();
                 }
             }, 100); // Update at ~10 FPS for smooth blocky effect
         }
