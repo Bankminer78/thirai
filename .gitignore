@@ -16,6 +16,7 @@ vae_runner
 venv/
 .venv-coreml311/
 
+classic_ae/
 myface_ds/
 node_modules
 output/

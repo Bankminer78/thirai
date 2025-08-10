@@ -92,6 +92,41 @@
                             <span class="slider"></span>
                         </label>
                     </div>
+                    <div class="flex items-center gap-2">
+                        <label for="patchSizeSlider" class="font-medium">Patch Size:</label>
+                        <input type="range" id="patchSizeSlider" min="200" max="600" value="413" class="bg-gray-700">
+                        <span id="patchSizeValue" class="text-sm text-gray-300 w-12">413px</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="font-medium">Blocky Background:</span>
+                        <label class="switch">
+                            <input type="checkbox" id="blockyToggle" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+                
+                <!-- Bitrate Monitoring -->
+                <div class="mt-4 bg-gray-700 p-3 rounded-lg">
+                    <h3 class="text-lg font-medium mb-2">📊 Bitrate Monitoring</h3>
+                    <div class="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                            <div class="text-gray-300">Video Bitrate:</div>
+                            <div id="videoBitrate" class="text-white font-mono">-- Kbps</div>
+                        </div>
+                        <div>
+                            <div class="text-gray-300">Data Channel:</div>
+                            <div id="dataBitrate" class="text-white font-mono">-- Kbps</div>
+                        </div>
+                        <div>
+                            <div class="text-gray-300">Total Bitrate:</div>
+                            <div id="totalBitrate" class="text-white font-mono">-- Kbps</div>
+                        </div>
+                        <div>
+                            <div class="text-gray-300">SR Overhead:</div>
+                            <div id="srOverhead" class="text-white font-mono">-- Kbps</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -105,6 +140,9 @@
         const SIGNALING_SERVER_URL = 'https://e57023ff-b0b5-400b-8458-03ea0b8e6bd1-00-155a22aats1if.worf.replit.dev/';
         const FASTAPI_SERVER_URL = 'http://127.0.0.1:8000'; // Your FastAPI server
         const SR_FPS = 3; // Target FPS for Super Resolution
+        
+        // Check if FastAPI server is accessible
+        let fastApiAvailable = false;
 
         // --- UI ELEMENTS ---
         const roleSelectionDiv = document.getElementById('role-selection');
@@ -118,7 +156,16 @@
         const videoChatContainer = document.getElementById('video-chat');
         const srControlsDiv = document.getElementById('sr-controls');
         const srToggle = document.getElementById('srToggle');
+        const patchSizeSlider = document.getElementById('patchSizeSlider');
+        const patchSizeValue = document.getElementById('patchSizeValue');
+        const blockyToggle = document.getElementById('blockyToggle');
         const captureCanvas = document.getElementById('captureCanvas');
+        
+        // Bitrate monitoring elements
+        const videoBitrateDiv = document.getElementById('videoBitrate');
+        const dataBitrateDiv = document.getElementById('dataBitrate');
+        const totalBitrateDiv = document.getElementById('totalBitrate');
+        const srOverheadDiv = document.getElementById('srOverhead');
         const patchCanvas = document.getElementById('patchCanvas');
         const patchCtx = patchCanvas.getContext('2d');
         const senderPatchOverlay = document.getElementById('senderPatchOverlay');
@@ -132,6 +179,19 @@
         let videoSender;
         let dataChannel;
         let srLoopInterval = null;
+        let currentPatchSize = 413; // Dynamic patch size
+        
+        // Bitrate tracking variables
+        let bitrateMonitorInterval = null;
+        let lastVideoBytes = 0;
+        let lastDataChannelBytes = 0;
+        let srDataTransferred = 0; // Bytes transferred for SR
+        let lastSrBytes = 0;
+        
+        // SR patch persistence
+        let lastSRPatch = null; // Store the last decoded SR patch
+        let lastSRPatchPosition = null; // Store patch position
+        
         const socket = io(SIGNALING_SERVER_URL);
         const roomName = 'hackathon-room-sr';
 
@@ -140,18 +200,45 @@
         // --- 1. ROLE SELECTION & INITIALIZATION ---
         senderButton.onclick = () => setUserRole('sender');
         receiverButton.onclick = () => setUserRole('receiver');
+        
+        // Check FastAPI server availability
+        async function checkFastApiAvailability() {
+            try {
+                const response = await fetch(`${FASTAPI_SERVER_URL}/health`, {
+                    method: 'GET',
+                    signal: AbortSignal.timeout(3000) // 3 second timeout
+                });
+                fastApiAvailable = response.ok;
+                console.log(`🔍 [FASTAPI] Server availability: ${fastApiAvailable ? 'Available' : 'Not Available'}`);
+            } catch (error) {
+                fastApiAvailable = false;
+                console.log('🔍 [FASTAPI] Server not accessible - will disable Super Resolution features');
+            }
+        }
+        
+        // Check FastAPI on page load
+        checkFastApiAvailability();
 
         async function setUserRole(role) {
             userRole = role;
             console.log(`[DIAGNOSTIC] SR Role selected: ${role}`);
+            
+            // Show/hide SR controls based on role and FastAPI availability
             if (role === 'receiver') {
                 srControlsDiv.classList.add('hidden'); // Hide SR toggle for receiver
+            } else if (!fastApiAvailable) {
+                // Show warning for sender when FastAPI not available
+                const srLabel = srControlsDiv.querySelector('span');
+                srLabel.textContent = 'Super Resolution (FastAPI Not Available)';
+                srToggle.disabled = true;
+                srToggle.title = 'FastAPI server required for Super Resolution';
             }
+            
             roleSelectionDiv.classList.add('hidden');
             statusDiv.innerText = `Role: ${role}. Enabling camera...`;
             
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
                 localVideo.srcObject = localStream;
                 videoChatContainer.classList.remove('hidden');
                 statusDiv.innerText = 'Camera enabled. Joining room...';
@@ -244,6 +331,11 @@
                 console.log('[DIAGNOSTIC] Remote track received.');
                 remoteVideo.srcObject = event.streams[0];
                 statusDiv.innerText = 'Connection established!';
+                
+                // Start continuous background rendering if receiver
+                if (userRole === 'receiver') {
+                    startBackgroundRendering();
+                }
             };
 
             peerConnection.onicecandidate = (event) => {
@@ -283,10 +375,14 @@
                     userRole: userRole,
                     isInitiator: isInitiator
                 });
+                
+                // Start bitrate monitoring when connection is ready
+                startBitrateMonitoring();
             };
             
             dataChannel.onclose = () => {
                 console.log('❌ [DATA_CHANNEL] Data channel CLOSED!');
+                stopBitrateMonitoring();
             };
             
             dataChannel.onerror = (error) => {
@@ -305,6 +401,12 @@
         // --- 4. SUPER RESOLUTION & DATA CHANNEL LOGIC ---
         srToggle.onchange = () => {
             if (srToggle.checked && userRole === 'sender') {
+                // Check FastAPI availability first
+                if (!fastApiAvailable) {
+                    statusDiv.innerText = '❌ Super Resolution requires FastAPI server connection';
+                    srToggle.checked = false;
+                    return;
+                }
                 console.log('🔍 [SR_TOGGLE] Enabling Super Resolution - Connection State:');
                 console.log({
                     userRole: userRole,
@@ -331,6 +433,14 @@
                 hideSenderPatchOverlay();
                 clearInterval(srLoopInterval);
                 srLoopInterval = null;
+                
+                // Reset SR tracking
+                srDataTransferred = 0;
+                lastSrBytes = 0;
+                
+                // Clear stored SR patch
+                lastSRPatch = null;
+                lastSRPatchPosition = null;
             }
         };
         
@@ -348,7 +458,7 @@
             overlay.height = video.clientHeight;
             
             // Draw patch indicator using SAME logic as capture
-            const patchSize = 256;
+            const patchSize = currentPatchSize;
             const videoWidth = video.videoWidth || video.clientWidth;
             const videoHeight = video.videoHeight || video.clientHeight;
             
@@ -428,8 +538,8 @@
                 return;
             }
             
-            // Calculate center patch coordinates (256x256)
-            const patchSize = 256;
+            // Calculate center patch coordinates (dynamic size)
+            const patchSize = currentPatchSize;
             const centerX = Math.floor(videoWidth / 2);
             const centerY = Math.floor(videoHeight / 2);
             const patchX = centerX - patchSize / 2;
@@ -495,14 +605,26 @@
                         // Shape and dtype are now preserved in numpy serialization
                     };
                     
-                    dataChannel.send(JSON.stringify(latentMessage));
+                    const messageStr = JSON.stringify(latentMessage);
+                    dataChannel.send(messageStr);
+                    
+                    // Track SR data for bitrate monitoring
+                    srDataTransferred += messageStr.length;
                     
                     statusDiv.innerText = `📡 Latent sent in ${Math.round(encodeTime)}ms (VAE: ${encodeResult.encode_time_ms}ms)`;
                     console.log('📡 [SENDER] Latent vector sent via data channel');
 
                 } catch (error) {
                     console.error('❌ [SENDER] Error in SR loop:', error);
-                    statusDiv.innerText = `❌ Encode failed: ${error.message}`;
+                    
+                    // Check if it's a network/FastAPI error
+                    if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+                        statusDiv.innerText = '❌ FastAPI server connection lost - disabling SR';
+                        fastApiAvailable = false;
+                    } else {
+                        statusDiv.innerText = `❌ Encode failed: ${error.message}`;
+                    }
+                    
                     srToggle.checked = false;
                     clearInterval(srLoopInterval);
                     hideSenderPatchOverlay();
@@ -563,9 +685,9 @@
                 patchCanvas.width = remoteVideo.clientWidth;
                 patchCanvas.height = remoteVideo.clientHeight;
                 
-                // The decoded patch is already 256x256 - we just need to position it correctly
-                // Calculate where to place the 256x256 patch on the canvas
-                const patchSize = 256; // This is the ACTUAL size of the decoded image
+                // The decoded patch is 256x256 from server - scale to current patch size
+                // Calculate where to place the patch on the canvas
+                const patchSize = currentPatchSize; // This is the desired display size
                 
                 // Position the patch at the center of the canvas (matching sender's relative position)
                 const patchCanvasX = (patchCanvas.width - patchSize) / 2;
@@ -582,15 +704,29 @@
                     approach: 'native 256x256 patch, centered positioning'
                 });
                 
-                // First draw the original video frame as background
-                patchCtx.drawImage(remoteVideo, 0, 0, patchCanvas.width, patchCanvas.height);
+                // Draw background with blocky effect if enabled
+                if (blockyToggle.checked) {
+                    drawBlockyBackground(patchCtx, patchCanvas.width, patchCanvas.height, patchCanvasX, patchCanvasY, patchCanvasWidth, patchCanvasHeight);
+                } else {
+                    // First draw the original video frame as background
+                    patchCtx.drawImage(remoteVideo, 0, 0, patchCanvas.width, patchCanvas.height);
+                }
                 
-                // Then draw the decoded patch over the specific area
+                // Then draw the decoded patch over the specific area, scaling from 256x256 to 413px
                 patchCtx.drawImage(
                     imageBitmap, 
-                    patchCanvasX, patchCanvasY, 
-                    patchCanvasWidth, patchCanvasHeight
+                    0, 0, imageBitmap.width, imageBitmap.height,  // Source: full decoded image
+                    patchCanvasX, patchCanvasY, patchCanvasWidth, patchCanvasHeight  // Destination: scaled to current patch size
                 );
+                
+                // Store the SR patch for persistence
+                lastSRPatch = imageBitmap;
+                lastSRPatchPosition = {
+                    x: patchCanvasX,
+                    y: patchCanvasY,
+                    width: patchCanvasWidth,
+                    height: patchCanvasHeight
+                };
                 
                 // Optional: Draw border around the patch for debugging
                 patchCtx.strokeStyle = 'rgba(0, 255, 136, 0.8)';
@@ -604,7 +740,14 @@
 
             } catch (error) {
                 console.error('❌ [RECEIVER] Error decoding/patching frame:', error);
-                statusDiv.innerText = `❌ Decode failed: ${error.message}`;
+                
+                // Check if it's a network/FastAPI error
+                if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+                    statusDiv.innerText = '❌ FastAPI server not accessible - cannot decode SR';
+                    fastApiAvailable = false;
+                } else {
+                    statusDiv.innerText = `❌ Decode failed: ${error.message}`;
+                }
                 
                 // Show error visually on canvas
                 patchCtx.fillStyle = 'rgba(255, 0, 0, 0.3)';
@@ -628,6 +771,160 @@
             videoSender.setParameters(parameters)
                 .then(() => statusDiv.innerText = `Bitrate set to ${bitrate/1000} Kbps.`)
                 .catch(e => console.error('Error setting bitrate:', e));
+        }
+
+        // --- 6. PATCH SIZE CONTROL ---
+        patchSizeSlider.addEventListener('input', updatePatchSize);
+        
+        // --- BLOCKY BACKGROUND CONTROL ---
+        blockyToggle.addEventListener('change', () => {
+            console.log(`🎨 [BLOCKY] Blocky background: ${blockyToggle.checked ? 'ON' : 'OFF'}`);
+            
+            if (!blockyToggle.checked && userRole === 'receiver') {
+                // Clear the canvas to show original video
+                patchCtx.clearRect(0, 0, patchCanvas.width, patchCanvas.height);
+            }
+        });
+        function updatePatchSize() {
+            currentPatchSize = parseInt(patchSizeSlider.value);
+            patchSizeValue.textContent = currentPatchSize + 'px';
+            
+            // Update sender overlay if active
+            if (userRole === 'sender' && srToggle.checked) {
+                showSenderPatchOverlay();
+            }
+        }
+
+        // --- BLOCKY BACKGROUND EFFECT ---
+        function drawBlockyBackground(ctx, canvasWidth, canvasHeight, patchX, patchY, patchWidth, patchHeight) {
+            // Create a temporary canvas for the blocky effect
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            
+            // Downscale factor for blocky effect (higher = blockier)
+            const scaleFactor = 16;
+            tempCanvas.width = Math.max(1, Math.floor(canvasWidth / scaleFactor));
+            tempCanvas.height = Math.max(1, Math.floor(canvasHeight / scaleFactor));
+            
+            // Draw the video to the small canvas (downscaled)
+            tempCtx.drawImage(remoteVideo, 0, 0, tempCanvas.width, tempCanvas.height);
+            
+            // Draw the blocky version back to the main canvas (upscaled with pixelated effect)
+            ctx.imageSmoothingEnabled = false; // Disable smoothing for pixelated look
+            ctx.drawImage(tempCanvas, 0, 0, canvasWidth, canvasHeight);
+            ctx.imageSmoothingEnabled = true; // Re-enable smoothing for other drawing operations
+            
+            // Optional: Draw a slightly darker overlay on the patch area to show where the high-quality patch will go
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.fillRect(patchX, patchY, patchWidth, patchHeight);
+        }
+        
+        // --- CONTINUOUS BACKGROUND RENDERING ---
+        let backgroundRenderInterval = null;
+        
+        function startBackgroundRendering() {
+            if (backgroundRenderInterval) return; // Already running
+            
+            backgroundRenderInterval = setInterval(() => {
+                if (!remoteVideo.videoWidth || !remoteVideo.videoHeight) return;
+                
+                // Only render if blocky mode is on
+                if (blockyToggle.checked) {
+                    patchCanvas.width = remoteVideo.clientWidth;
+                    patchCanvas.height = remoteVideo.clientHeight;
+                    
+                    // Calculate patch area (even if no SR is active, show where it would be)
+                    const patchSize = currentPatchSize;
+                    const patchCanvasX = (patchCanvas.width - patchSize) / 2;
+                    const patchCanvasY = (patchCanvas.height - patchSize) / 2;
+                    
+                    drawBlockyBackground(patchCtx, patchCanvas.width, patchCanvas.height, patchCanvasX, patchCanvasY, patchSize, patchSize);
+                    
+                    // If we have a stored SR patch, redraw it on top of the blocky background
+                    if (lastSRPatch && lastSRPatchPosition) {
+                        patchCtx.drawImage(
+                            lastSRPatch,
+                            0, 0, lastSRPatch.width, lastSRPatch.height,
+                            lastSRPatchPosition.x, lastSRPatchPosition.y, 
+                            lastSRPatchPosition.width, lastSRPatchPosition.height
+                        );
+                        
+                        // Draw border around the persisted patch
+                        patchCtx.strokeStyle = 'rgba(0, 255, 136, 0.8)';
+                        patchCtx.lineWidth = 2;
+                        patchCtx.strokeRect(lastSRPatchPosition.x, lastSRPatchPosition.y, 
+                                          lastSRPatchPosition.width, lastSRPatchPosition.height);
+                    } else {
+                        // Draw patch area indicator (subtle outline) if no SR patch
+                        patchCtx.strokeStyle = 'rgba(0, 255, 136, 0.3)';
+                        patchCtx.lineWidth = 1;
+                        patchCtx.strokeRect(patchCanvasX, patchCanvasY, patchSize, patchSize);
+                    }
+                }
+            }, 100); // Update at ~10 FPS for smooth blocky effect
+        }
+        
+        function stopBackgroundRendering() {
+            if (backgroundRenderInterval) {
+                clearInterval(backgroundRenderInterval);
+                backgroundRenderInterval = null;
+            }
+        }
+
+        // --- 7. BITRATE MONITORING ---
+        function startBitrateMonitoring() {
+            if (bitrateMonitorInterval) return; // Already running
+            
+            bitrateMonitorInterval = setInterval(async () => {
+                if (!peerConnection) return;
+                
+                try {
+                    const stats = await peerConnection.getStats();
+                    let videoBytesNow = 0;
+                    let dataBytesNow = 0;
+                    
+                    stats.forEach(report => {
+                        if (report.type === 'outbound-rtp' && report.mediaType === 'video') {
+                            videoBytesNow = report.bytesSent || 0;
+                        } else if (report.type === 'data-channel' && report.label === 'sr-data') {
+                            dataBytesNow = report.bytesSent || 0;
+                        }
+                    });
+                    
+                    // Calculate bitrates (bytes/sec to kbps)
+                    const videoBitrate = Math.round((videoBytesNow - lastVideoBytes) * 8 / 1000);
+                    const dataBitrate = Math.round((dataBytesNow - lastDataChannelBytes) * 8 / 1000);
+                    const srBitrate = Math.round((srDataTransferred - lastSrBytes) * 8 / 1000);
+                    const totalBitrate = videoBitrate + dataBitrate;
+                    
+                    // Update UI
+                    videoBitrateDiv.textContent = `${videoBitrate} Kbps`;
+                    dataBitrateDiv.textContent = `${dataBitrate} Kbps`;
+                    totalBitrateDiv.textContent = `${totalBitrate} Kbps`;
+                    srOverheadDiv.textContent = `${srBitrate} Kbps`;
+                    
+                    // Store for next calculation
+                    lastVideoBytes = videoBytesNow;
+                    lastDataChannelBytes = dataBytesNow;
+                    lastSrBytes = srDataTransferred;
+                    
+                } catch (error) {
+                    console.error('Error monitoring bitrate:', error);
+                }
+            }, 1000);
+        }
+        
+        function stopBitrateMonitoring() {
+            if (bitrateMonitorInterval) {
+                clearInterval(bitrateMonitorInterval);
+                bitrateMonitorInterval = null;
+                
+                // Reset display
+                videoBitrateDiv.textContent = '-- Kbps';
+                dataBitrateDiv.textContent = '-- Kbps';
+                totalBitrateDiv.textContent = '-- Kbps';
+                srOverheadDiv.textContent = '-- Kbps';
+            }
         }
     </script>
 </body>
