@@ -139,7 +139,7 @@
         // --- CONFIGURATION ---
         const SIGNALING_SERVER_URL = 'https://e57023ff-b0b5-400b-8458-03ea0b8e6bd1-00-155a22aats1if.worf.replit.dev/';
         const FASTAPI_SERVER_URL = 'http://127.0.0.1:8000'; // Your FastAPI server
-        const SR_FPS = 3; // Target FPS for Super Resolution
+        const SR_FPS = 1; // Target FPS for Super Resolution
         
         // Check if FastAPI server is accessible
         let fastApiAvailable = false;
@@ -181,12 +181,15 @@
         let srLoopInterval = null;
         let currentPatchSize = 413; // Dynamic patch size
         
-        // Bitrate tracking variables
+        // Enhanced bitrate tracking variables
         let bitrateMonitorInterval = null;
-        let lastVideoBytes = 0;
-        let lastDataChannelBytes = 0;
-        let srDataTransferred = 0; // Bytes transferred for SR
+        let lastVideoBytesSent = 0;
+        let lastVideoBytesReceived = 0;
+        let lastDataChannelBytesSent = 0;
+        let lastDataChannelBytesReceived = 0;
+        let srDataTransferred = 0; // Bytes transferred for SR (manual tracking)
         let lastSrBytes = 0;
+        let lastTimestamp = Date.now();
         
         // SR patch persistence
         let lastSRPatch = null; // Store the last decoded SR patch
@@ -609,10 +612,16 @@
                     dataChannel.send(messageStr);
                     
                     // Track SR data for bitrate monitoring
-                    srDataTransferred += messageStr.length;
+                    const messageSize = messageStr.length;
+                    srDataTransferred += messageSize;
                     
                     statusDiv.innerText = `📡 Latent sent in ${Math.round(encodeTime)}ms (VAE: ${encodeResult.encode_time_ms}ms)`;
-                    console.log('📡 [SENDER] Latent vector sent via data channel');
+                    console.log('📡 [SENDER] Latent vector sent via data channel:', {
+                        message_size_bytes: messageSize,
+                        latent_b64_length: encodeResult.latent_b64?.length || 0,
+                        total_sr_data_sent: srDataTransferred,
+                        compression_ratio: ((encodeResult.latent_b64?.length || 0) / messageSize * 100).toFixed(1) + '%'
+                    });
 
                 } catch (error) {
                     console.error('❌ [SENDER] Error in SR loop:', error);
@@ -635,8 +644,14 @@
         async function handleDataChannelMessage(event) {
             const latentMessage = JSON.parse(event.data);
             
+            // Track received SR data for bitrate monitoring
+            const messageSize = event.data.length;
+            srDataTransferred += messageSize;
+            
             console.log('🎯 [RECEIVER] Received latent message:', {
                 latent_b64_length: latentMessage.latent_b64?.length || 0,
+                message_size_bytes: messageSize,
+                total_sr_data_received: srDataTransferred,
                 serialization: 'numpy.save format (preserves all metadata)'
             });
             
@@ -871,42 +886,82 @@
             }
         }
 
-        // --- 7. BITRATE MONITORING ---
+        // --- 7. ENHANCED BITRATE MONITORING ---
         function startBitrateMonitoring() {
             if (bitrateMonitorInterval) return; // Already running
+            
+            // Initialize timestamp
+            lastTimestamp = Date.now();
             
             bitrateMonitorInterval = setInterval(async () => {
                 if (!peerConnection) return;
                 
                 try {
+                    const currentTime = Date.now();
+                    const timeElapsed = (currentTime - lastTimestamp) / 1000; // seconds
+                    
                     const stats = await peerConnection.getStats();
-                    let videoBytesNow = 0;
-                    let dataBytesNow = 0;
+                    let videoBytesSent = 0, videoBytesReceived = 0;
+                    let dataChannelBytesSent = 0, dataChannelBytesReceived = 0;
                     
                     stats.forEach(report => {
+                        // Video RTP stats
                         if (report.type === 'outbound-rtp' && report.mediaType === 'video') {
-                            videoBytesNow = report.bytesSent || 0;
-                        } else if (report.type === 'data-channel' && report.label === 'sr-data') {
-                            dataBytesNow = report.bytesSent || 0;
+                            videoBytesSent = report.bytesSent || 0;
+                        } else if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                            videoBytesReceived = report.bytesReceived || 0;
+                        }
+                        // Data channel stats (includes SR latent data)
+                        else if (report.type === 'data-channel') {
+                            if (report.state === 'open') {
+                                dataChannelBytesSent += report.bytesSent || 0;
+                                dataChannelBytesReceived += report.bytesReceived || 0;
+                            }
                         }
                     });
                     
-                    // Calculate bitrates (bytes/sec to kbps)
-                    const videoBitrate = Math.round((videoBytesNow - lastVideoBytes) * 8 / 1000);
-                    const dataBitrate = Math.round((dataBytesNow - lastDataChannelBytes) * 8 / 1000);
-                    const srBitrate = Math.round((srDataTransferred - lastSrBytes) * 8 / 1000);
+                    // Calculate bitrates based on role
+                    let videoBitrate, dataBitrate, srBitrate;
+                    
+                    if (userRole === 'sender') {
+                        // Sender: track outgoing video + outgoing SR data
+                        videoBitrate = Math.round(((videoBytesSent - lastVideoBytesSent) * 8) / (timeElapsed * 1000));
+                        dataBitrate = Math.round(((dataChannelBytesSent - lastDataChannelBytesSent) * 8) / (timeElapsed * 1000));
+                        srBitrate = Math.round(((srDataTransferred - lastSrBytes) * 8) / (timeElapsed * 1000));
+                        
+                        lastVideoBytesSent = videoBytesSent;
+                        lastDataChannelBytesSent = dataChannelBytesSent;
+                    } else {
+                        // Receiver: track incoming video + incoming SR data
+                        videoBitrate = Math.round(((videoBytesReceived - lastVideoBytesReceived) * 8) / (timeElapsed * 1000));
+                        dataBitrate = Math.round(((dataChannelBytesReceived - lastDataChannelBytesReceived) * 8) / (timeElapsed * 1000));
+                        srBitrate = dataBitrate; // For receiver, SR bitrate = data channel bitrate
+                        
+                        lastVideoBytesReceived = videoBytesReceived;
+                        lastDataChannelBytesReceived = dataChannelBytesReceived;
+                    }
+                    
                     const totalBitrate = videoBitrate + dataBitrate;
                     
-                    // Update UI
-                    videoBitrateDiv.textContent = `${videoBitrate} Kbps`;
-                    dataBitrateDiv.textContent = `${dataBitrate} Kbps`;
-                    totalBitrateDiv.textContent = `${totalBitrate} Kbps`;
-                    srOverheadDiv.textContent = `${srBitrate} Kbps`;
+                    // Update UI with role-specific labels
+                    const direction = userRole === 'sender' ? '↑' : '↓';
+                    videoBitrateDiv.textContent = `${direction} ${Math.max(0, videoBitrate)} Kbps`;
+                    dataBitrateDiv.textContent = `${direction} ${Math.max(0, dataBitrate)} Kbps`;
+                    totalBitrateDiv.textContent = `${direction} ${Math.max(0, totalBitrate)} Kbps`;
+                    srOverheadDiv.textContent = `${direction} ${Math.max(0, srBitrate)} Kbps`;
                     
                     // Store for next calculation
-                    lastVideoBytes = videoBytesNow;
-                    lastDataChannelBytes = dataBytesNow;
                     lastSrBytes = srDataTransferred;
+                    lastTimestamp = currentTime;
+                    
+                    // Debug logging
+                    console.log(`📊 [BITRATE] ${userRole.toUpperCase()}:`, {
+                        video: videoBitrate + ' Kbps',
+                        dataChannel: dataBitrate + ' Kbps', 
+                        srOverhead: srBitrate + ' Kbps',
+                        total: totalBitrate + ' Kbps',
+                        srDataTransferred: srDataTransferred + ' bytes'
+                    });
                     
                 } catch (error) {
                     console.error('Error monitoring bitrate:', error);
@@ -918,6 +973,15 @@
             if (bitrateMonitorInterval) {
                 clearInterval(bitrateMonitorInterval);
                 bitrateMonitorInterval = null;
+                
+                // Reset tracking variables
+                lastVideoBytesSent = 0;
+                lastVideoBytesReceived = 0;
+                lastDataChannelBytesSent = 0;
+                lastDataChannelBytesReceived = 0;
+                srDataTransferred = 0;
+                lastSrBytes = 0;
+                lastTimestamp = Date.now();
                 
                 // Reset display
                 videoBitrateDiv.textContent = '-- Kbps';
