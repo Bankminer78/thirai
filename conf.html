@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hackathon Video Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            padding-top: 75%; /* 4:3 Aspect Ratio */
+            background-color: #1a202c;
+            border-radius: 0.5rem;
+        }
+        .video-wrapper video, .video-wrapper canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 0.5rem;
+        }
+        #patchCanvas { z-index: 5; /* Sits on top of the video */ }
+        .local-video-container {
+            position: absolute;
+            bottom: 1rem;
+            right: 1rem;
+            width: 25%;
+            max-width: 200px;
+            border: 2px solid white;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            z-index: 10;
+        }
+        /* Simple toggle switch styles */
+        .switch { position: relative; display: inline-block; width: 60px; height: 34px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #4a5568; transition: .4s; border-radius: 34px; }
+        .slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #4c51bf; }
+        input:checked + .slider:before { transform: translateX(26px); }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
+
+    <div class="w-full max-w-4xl p-4">
+        <h1 class="text-3xl font-bold text-center mb-4">Video Demo w/ SR Architecture</h1>
+        <p id="status" class="text-center text-gray-400 mb-6">Status: Select your role.</p>
+
+        <!-- Role Selection -->
+        <div id="role-selection" class="text-center p-4">
+            <h2 class="text-xl mb-4">What is your role for Super Resolution?</h2>
+            <div class="flex justify-center gap-4">
+                <button id="senderButton" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg text-lg">SR Sender</button>
+                <button id="receiverButton" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg text-lg">SR Receiver</button>
+            </div>
+        </div>
+
+        <div id="video-chat" class="hidden">
+            <!-- Main video grid -->
+            <div class="relative bg-gray-800 rounded-lg shadow-lg">
+                <div class="video-wrapper">
+                    <video id="remoteVideo" autoplay playsinline></video>
+                    <canvas id="patchCanvas"></canvas> <!-- Canvas for patching SR frames -->
+                </div>
+                <div class="local-video-container">
+                    <div class="video-wrapper">
+                         <video id="localVideo" autoplay playsinline muted></video>
+                         <canvas id="senderPatchOverlay" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 6;"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="mt-6 bg-gray-800 p-4 rounded-lg shadow-lg">
+                <h2 class="text-xl font-semibold mb-3">Controls</h2>
+                <div class="flex flex-wrap items-center justify-center gap-6">
+                    <div class="flex items-center gap-2">
+                        <label for="bitrateInput" class="font-medium">Max Bitrate (Kbps):</label>
+                        <input type="number" id="bitrateInput" class="bg-gray-700 border border-gray-600 text-white text-sm rounded-lg p-2 w-28" value="80">
+                        <button id="setBitrateButton" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">Set</button>
+                    </div>
+                    <div id="sr-controls" class="flex items-center gap-3">
+                        <span class="font-medium">Super Resolution:</span>
+                        <label class="switch">
+                            <input type="checkbox" id="srToggle">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Hidden canvas for capturing frames -->
+    <canvas id="captureCanvas" class="hidden"></canvas>
+
+    <script>
+        // --- CONFIGURATION ---
+        const SIGNALING_SERVER_URL = 'https://e57023ff-b0b5-400b-8458-03ea0b8e6bd1-00-155a22aats1if.worf.replit.dev/';
+        const FASTAPI_SERVER_URL = 'http://127.0.0.1:8000'; // Your FastAPI server
+        const SR_FPS = 3; // Target FPS for Super Resolution
+
+        // --- UI ELEMENTS ---
+        const roleSelectionDiv = document.getElementById('role-selection');
+        const senderButton = document.getElementById('senderButton');
+        const receiverButton = document.getElementById('receiverButton');
+        const bitrateInput = document.getElementById('bitrateInput');
+        const setBitrateButton = document.getElementById('setBitrateButton');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const statusDiv = document.getElementById('status');
+        const videoChatContainer = document.getElementById('video-chat');
+        const srControlsDiv = document.getElementById('sr-controls');
+        const srToggle = document.getElementById('srToggle');
+        const captureCanvas = document.getElementById('captureCanvas');
+        const patchCanvas = document.getElementById('patchCanvas');
+        const patchCtx = patchCanvas.getContext('2d');
+        const senderPatchOverlay = document.getElementById('senderPatchOverlay');
+        const senderPatchCtx = senderPatchOverlay.getContext('2d');
+
+        // --- STATE VARIABLES ---
+        let userRole = null; // 'sender' or 'receiver' for SR
+        let isInitiator = false; // Am I the one starting the call?
+        let localStream;
+        let peerConnection;
+        let videoSender;
+        let dataChannel;
+        let srLoopInterval = null;
+        const socket = io(SIGNALING_SERVER_URL);
+        const roomName = 'hackathon-room-sr';
+
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+        // --- 1. ROLE SELECTION & INITIALIZATION ---
+        senderButton.onclick = () => setUserRole('sender');
+        receiverButton.onclick = () => setUserRole('receiver');
+
+        async function setUserRole(role) {
+            userRole = role;
+            console.log(`[DIAGNOSTIC] SR Role selected: ${role}`);
+            if (role === 'receiver') {
+                srControlsDiv.classList.add('hidden'); // Hide SR toggle for receiver
+            }
+            roleSelectionDiv.classList.add('hidden');
+            statusDiv.innerText = `Role: ${role}. Enabling camera...`;
+            
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+                videoChatContainer.classList.remove('hidden');
+                statusDiv.innerText = 'Camera enabled. Joining room...';
+                socket.emit('join_room', roomName);
+                console.log(`[DIAGNOSTIC] Emitted 'join_room' for room "${roomName}"`);
+            } catch (error) {
+                console.error('Error accessing media devices.', error);
+                statusDiv.innerText = 'Error: Could not access camera.';
+            }
+        }
+
+        // --- 2. SIMPLIFIED SIGNALING LOGIC ---
+        socket.on('connect', () => console.log('[DIAGNOSTIC] Connected to signaling server.'));
+
+        // The server tells us the room is ready and if we are the initiator
+        socket.on('room_ready', (data) => {
+            isInitiator = data.isInitiator;
+            console.log(`[DIAGNOSTIC] 'room_ready' event received. I am ${isInitiator ? 'the initiator' : 'not the initiator'}.`);
+            statusDiv.innerText = 'Peer has joined. Creating connection...';
+            createPeerConnection(); // Both peers create their connection object
+            if (isInitiator) {
+                console.log('[DIAGNOSTIC] As initiator, I am creating an offer.');
+                createOffer();
+            }
+        });
+
+        socket.on('offer', async (offer) => {
+            if (!isInitiator) {
+                console.log('[DIAGNOSTIC] Received offer.');
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                console.log('[DIAGNOSTIC] Creating answer.');
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                socket.emit('signal', { type: 'answer', payload: answer });
+                console.log('[DIAGNOSTIC] Answer sent.');
+            }
+        });
+
+        socket.on('answer', async (answer) => {
+            if (isInitiator) {
+                console.log('[DIAGNOSTIC] Received answer.');
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            }
+        });
+
+        socket.on('candidate', (candidate) => {
+            console.log('[DIAGNOSTIC] Received ICE candidate.');
+            peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        });
+        
+        // Generic signal handler from the server
+        socket.on('signal', (message) => {
+            const { type, payload } = message;
+            if (type === 'offer') {
+                socket.emit('forward_offer', message);
+            } else if (type === 'answer') {
+                socket.emit('forward_answer', message);
+            } else if (type === 'candidate') {
+                socket.emit('forward_candidate', message);
+            }
+        });
+
+
+        // --- 3. WebRTC CORE LOGIC ---
+        async function createOffer() {
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            socket.emit('signal', { type: 'offer', payload: offer });
+        }
+
+        function createPeerConnection() {
+            if (peerConnection) {
+                console.log("[DIAGNOSTIC] Peer connection already exists. Ignoring.");
+                return;
+            }
+            console.log('[DIAGNOSTIC] Creating new RTCPeerConnection.');
+            peerConnection = new RTCPeerConnection(configuration);
+
+            localStream.getTracks().forEach(track => {
+                if (track.kind === 'video') {
+                    videoSender = peerConnection.addTrack(track, localStream);
+                } else {
+                    peerConnection.addTrack(track, localStream);
+                }
+            });
+
+            setBandwidth(); // Set initial bandwidth
+
+            peerConnection.ontrack = (event) => {
+                console.log('[DIAGNOSTIC] Remote track received.');
+                remoteVideo.srcObject = event.streams[0];
+                statusDiv.innerText = 'Connection established!';
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log('[DIAGNOSTIC] Generated ICE candidate, sending to peer.');
+                    socket.emit('signal', { type: 'candidate', payload: event.candidate });
+                }
+            };
+
+            // Data Channel setup - initiator creates, non-initiator receives
+            if (isInitiator) {
+                console.log('🔗 [DATA_CHANNEL] Creating data channel as initiator...');
+                dataChannel = peerConnection.createDataChannel('latent-vectors', {
+                    ordered: true,
+                    maxRetransmits: 0
+                });
+                setupDataChannel();
+                console.log('🔗 [DATA_CHANNEL] Data channel created:', dataChannel.label);
+            } else {
+                console.log('🔗 [DATA_CHANNEL] Waiting for data channel as non-initiator...');
+                peerConnection.ondatachannel = (event) => {
+                    console.log('🔗 [DATA_CHANNEL] Received data channel from peer');
+                    dataChannel = event.channel;
+                    setupDataChannel();
+                };
+            }
+        }
+        
+        function setupDataChannel() {
+            console.log('🔗 [DATA_CHANNEL] Setting up data channel for role:', userRole);
+            
+            dataChannel.onopen = () => {
+                console.log('✅ [DATA_CHANNEL] Data channel OPEN!');
+                console.log('🔍 [DATA_CHANNEL] Current state:', {
+                    readyState: dataChannel.readyState,
+                    label: dataChannel.label,
+                    userRole: userRole,
+                    isInitiator: isInitiator
+                });
+            };
+            
+            dataChannel.onclose = () => {
+                console.log('❌ [DATA_CHANNEL] Data channel CLOSED!');
+            };
+            
+            dataChannel.onerror = (error) => {
+                console.error('❌ [DATA_CHANNEL] Data channel error:', error);
+            };
+            
+            // Only the SR Receiver should listen for messages
+            if (userRole === 'receiver') {
+                dataChannel.onmessage = handleDataChannelMessage;
+                console.log('📨 [DATA_CHANNEL] Message listener attached for receiver');
+            } else {
+                console.log('📡 [DATA_CHANNEL] Sender mode - no message listener needed');
+            }
+        }
+
+        // --- 4. SUPER RESOLUTION & DATA CHANNEL LOGIC ---
+        srToggle.onchange = () => {
+            if (srToggle.checked && userRole === 'sender') {
+                console.log('🔍 [SR_TOGGLE] Enabling Super Resolution - Connection State:');
+                console.log({
+                    userRole: userRole,
+                    isInitiator: isInitiator,
+                    peerConnection_exists: !!peerConnection,
+                    peerConnection_state: peerConnection?.connectionState,
+                    peerConnection_iceState: peerConnection?.iceConnectionState,
+                    dataChannel_exists: !!dataChannel,
+                    dataChannel_readyState: dataChannel?.readyState,
+                    dataChannel_label: dataChannel?.label
+                });
+                
+                statusDiv.innerText = 'Super Resolution ON.';
+                showSenderPatchOverlay();
+                srLoopInterval = setInterval(senderSRLoop, 1000 / SR_FPS);
+                
+                // Force one immediate attempt to help with debugging
+                setTimeout(() => {
+                    console.log('🔍 [SR_TOGGLE] Forcing immediate SR loop attempt...');
+                    senderSRLoop();
+                }, 100);
+            } else {
+                statusDiv.innerText = 'Super Resolution OFF.';
+                hideSenderPatchOverlay();
+                clearInterval(srLoopInterval);
+                srLoopInterval = null;
+            }
+        };
+        
+        function showSenderPatchOverlay() {
+            const video = localVideo;
+            const overlay = senderPatchOverlay;
+            
+            if (!video || !overlay) {
+                console.log('⚠️ [PATCH_OVERLAY] Video or overlay element not found');
+                return;
+            }
+            
+            // Match overlay canvas to video dimensions
+            overlay.width = video.clientWidth;
+            overlay.height = video.clientHeight;
+            
+            // Draw patch indicator
+            const patchSize = 256;
+            const scaleX = video.clientWidth / (video.videoWidth || video.clientWidth);
+            const scaleY = video.clientHeight / (video.videoHeight || video.clientHeight);
+            
+            const centerX = overlay.width / 2;
+            const centerY = overlay.height / 2;
+            const displayPatchSize = Math.min(patchSize * scaleX, patchSize * scaleY);
+            
+            const patchX = centerX - displayPatchSize / 2;
+            const patchY = centerY - displayPatchSize / 2;
+            
+            senderPatchCtx.clearRect(0, 0, overlay.width, overlay.height);
+            
+            // Draw patch border
+            senderPatchCtx.strokeStyle = '#00ff88';
+            senderPatchCtx.lineWidth = 3;
+            senderPatchCtx.setLineDash([10, 5]);
+            senderPatchCtx.strokeRect(patchX, patchY, displayPatchSize, displayPatchSize);
+            
+            // Add label
+            senderPatchCtx.fillStyle = '#00ff88';
+            senderPatchCtx.font = '14px Arial';
+            senderPatchCtx.textAlign = 'center';
+            senderPatchCtx.fillText('SR Encoding Zone', centerX, patchY - 10);
+            
+            console.log('📦 [PATCH_OVERLAY] Patch overlay displayed:', {
+                display_size: `${Math.round(displayPatchSize)}x${Math.round(displayPatchSize)}`,
+                position: `(${Math.round(patchX)}, ${Math.round(patchY)})`,
+                video_size: `${video.clientWidth}x${video.clientHeight}`
+            });
+        }
+        
+        function hideSenderPatchOverlay() {
+            if (senderPatchCtx && senderPatchOverlay) {
+                senderPatchCtx.clearRect(0, 0, senderPatchOverlay.width, senderPatchOverlay.height);
+                console.log('📦 [PATCH_OVERLAY] Patch overlay hidden');
+            }
+        }
+
+        async function senderSRLoop() {
+            // Detailed data channel diagnostics
+            console.log('🔍 [SENDER] Data channel status check:', {
+                dataChannel_exists: !!dataChannel,
+                readyState: dataChannel?.readyState || 'null',
+                peerConnection_exists: !!peerConnection,
+                peerConnection_state: peerConnection?.connectionState || 'null',
+                userRole: userRole,
+                isInitiator: isInitiator
+            });
+            
+            if (!dataChannel) {
+                console.log('⚠️ [SENDER] Data channel does not exist, skipping frame');
+                return;
+            }
+            
+            if (dataChannel.readyState !== 'open') {
+                console.log(`⚠️ [SENDER] Data channel state is '${dataChannel.readyState}', not 'open'. Skipping frame.`);
+                return;
+            }
+
+            // Get video dimensions
+            const videoWidth = localVideo.videoWidth || localVideo.clientWidth;
+            const videoHeight = localVideo.videoHeight || localVideo.clientHeight;
+            
+            if (videoWidth === 0 || videoHeight === 0) {
+                console.log('⚠️ [SENDER] Video not ready, skipping frame');
+                return;
+            }
+            
+            // Calculate center patch coordinates (256x256)
+            const patchSize = 256;
+            const centerX = Math.floor(videoWidth / 2);
+            const centerY = Math.floor(videoHeight / 2);
+            const patchX = centerX - patchSize / 2;
+            const patchY = centerY - patchSize / 2;
+            
+            // Set up capture canvas for the patch only
+            captureCanvas.width = patchSize;
+            captureCanvas.height = patchSize;
+            const captureCtx = captureCanvas.getContext('2d');
+            
+            // Draw only the center patch from the video
+            captureCtx.drawImage(
+                localVideo, 
+                patchX, patchY, patchSize, patchSize,  // source coordinates
+                0, 0, patchSize, patchSize             // destination coordinates
+            );
+            
+            console.log('📷 [SENDER] Capturing 256x256 center patch for encoding...', {
+                video_size: `${videoWidth}x${videoHeight}`,
+                patch_coords: `(${patchX}, ${patchY})`,
+                patch_size: `${patchSize}x${patchSize}`
+            });
+            
+            captureCanvas.toBlob(async (blob) => {
+                try {
+                    const encodeStartTime = performance.now();
+                    
+                    const formData = new FormData();
+                    formData.append('file', blob, 'frame.jpg');
+                    
+                    statusDiv.innerText = '🔄 Encoding frame to latent vector...';
+                    
+                    const response = await fetch(`${FASTAPI_SERVER_URL}/encode_latent`, {
+                        method: 'POST',
+                        body: formData,
+                    });
+                    
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        throw new Error(`Encode error ${response.status}: ${errorText}`);
+                    }
+                    
+                    const encodeResult = await response.json();
+                    const encodeTime = performance.now() - encodeStartTime;
+                    
+                    console.log('✅ [SENDER] Encode successful!', {
+                        encode_time_ms: encodeResult.encode_time_ms,
+                        total_processing_time: Math.round(encodeTime),
+                        latent_shape: encodeResult.latent_shape,
+                        latent_dtype: encodeResult.latent_dtype,
+                        latent_stats: encodeResult.latent_stats,
+                        latent_b64_length: encodeResult.latent_b64?.length || 0,
+                        serialization: 'numpy.save format (preserves metadata)',
+                        patch_info: {
+                            video_size: `${videoWidth}x${videoHeight}`,
+                            patch_coords: `(${patchX}, ${patchY})`,
+                            patch_size: `${patchSize}x${patchSize}`
+                        }
+                    });
+                    
+                    const latentMessage = {
+                        latent_b64: encodeResult.latent_b64
+                        // Shape and dtype are now preserved in numpy serialization
+                    };
+                    
+                    dataChannel.send(JSON.stringify(latentMessage));
+                    
+                    statusDiv.innerText = `📡 Latent sent in ${Math.round(encodeTime)}ms (VAE: ${encodeResult.encode_time_ms}ms)`;
+                    console.log('📡 [SENDER] Latent vector sent via data channel');
+
+                } catch (error) {
+                    console.error('❌ [SENDER] Error in SR loop:', error);
+                    statusDiv.innerText = `❌ Encode failed: ${error.message}`;
+                    srToggle.checked = false;
+                    clearInterval(srLoopInterval);
+                    hideSenderPatchOverlay();
+                }
+            }, 'image/jpeg');
+        }
+
+        async function handleDataChannelMessage(event) {
+            const latentMessage = JSON.parse(event.data);
+            
+            console.log('🎯 [RECEIVER] Received latent message:', {
+                latent_b64_length: latentMessage.latent_b64?.length || 0,
+                serialization: 'numpy.save format (preserves all metadata)'
+            });
+            
+            // Show processing indicator
+            statusDiv.innerText = '🔄 Decoding latent vector...';
+            
+            try {
+                const decodeStartTime = performance.now();
+                
+                const response = await fetch(`${FASTAPI_SERVER_URL}/decode_latent`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        latent_b64: latentMessage.latent_b64
+                        // No longer need latent_shape or latent_dtype - numpy.save/load handles this
+                    }),
+                });
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('🔍 [RECEIVER] Decode request details:', {
+                        latent_b64_sample: latentMessage.latent_b64?.substring(0, 50) + '...',
+                        latent_b64_length: latentMessage.latent_b64?.length || 0,
+                        serialization_format: 'numpy.save (preserves all metadata)',
+                        request_body: {
+                            latent_b64: latentMessage.latent_b64?.substring(0, 20) + '...'
+                        }
+                    });
+                    throw new Error(`Decode error ${response.status}: ${errorText}`);
+                }
+
+                const decodeResult = await response.json();
+                const decodeTime = performance.now() - decodeStartTime;
+                
+                console.log('✅ [RECEIVER] Decode successful!', {
+                    decode_time_ms: decodeResult.decode_time_ms,
+                    total_processing_time: Math.round(decodeTime),
+                    output_size: decodeResult.output_size,
+                    success: decodeResult.success
+                });
+                
+                // Convert base64 to image and display
+                const imageBlob = await fetch(`data:image/jpeg;base64,${decodeResult.image_b64}`).then(r => r.blob());
+                const imageBitmap = await createImageBitmap(imageBlob);
+
+                patchCanvas.width = remoteVideo.clientWidth;
+                patchCanvas.height = remoteVideo.clientHeight;
+                
+                // Calculate where the 256x256 patch should be positioned on the canvas
+                const videoWidth = remoteVideo.videoWidth || remoteVideo.clientWidth;
+                const videoHeight = remoteVideo.videoHeight || remoteVideo.clientHeight;
+                
+                // Scale from video coordinates to canvas coordinates
+                const scaleX = patchCanvas.width / videoWidth;
+                const scaleY = patchCanvas.height / videoHeight;
+                
+                // Calculate patch position (center of video)
+                const patchSize = 256;
+                const videoCenterX = videoWidth / 2;
+                const videoCenterY = videoHeight / 2;
+                const patchVideoX = videoCenterX - patchSize / 2;
+                const patchVideoY = videoCenterY - patchSize / 2;
+                
+                // Convert to canvas coordinates
+                const patchCanvasX = patchVideoX * scaleX;
+                const patchCanvasY = patchVideoY * scaleY;
+                const patchCanvasWidth = patchSize * scaleX;
+                const patchCanvasHeight = patchSize * scaleY;
+                
+                console.log('🖼️ [RECEIVER] Patching decoded image:', {
+                    video_size: `${videoWidth}x${videoHeight}`,
+                    canvas_size: `${patchCanvas.width}x${patchCanvas.height}`,
+                    patch_video_coords: `(${Math.round(patchVideoX)}, ${Math.round(patchVideoY)})`,
+                    patch_canvas_coords: `(${Math.round(patchCanvasX)}, ${Math.round(patchCanvasY)})`,
+                    patch_canvas_size: `${Math.round(patchCanvasWidth)}x${Math.round(patchCanvasHeight)}`,
+                    scale: `${scaleX.toFixed(2)}x${scaleY.toFixed(2)}`
+                });
+                
+                // First draw the original video frame as background\n                patchCtx.drawImage(remoteVideo, 0, 0, patchCanvas.width, patchCanvas.height);
+                
+                // Then draw the decoded patch over the specific area
+                patchCtx.drawImage(
+                    imageBitmap, 
+                    patchCanvasX, patchCanvasY, 
+                    patchCanvasWidth, patchCanvasHeight
+                );
+                
+                // Optional: Draw border around the patch for debugging
+                patchCtx.strokeStyle = 'rgba(0, 255, 136, 0.8)';
+                patchCtx.lineWidth = 2;
+                patchCtx.strokeRect(patchCanvasX, patchCanvasY, patchCanvasWidth, patchCanvasHeight);
+                
+                // Update status with success info
+                statusDiv.innerText = `✨ Patch decoded in ${Math.round(decodeTime)}ms (VAE: ${decodeResult.decode_time_ms}ms)`;
+                
+                console.log('🎨 [RECEIVER] Decoded patch applied to canvas at correct position');
+
+            } catch (error) {
+                console.error('❌ [RECEIVER] Error decoding/patching frame:', error);
+                statusDiv.innerText = `❌ Decode failed: ${error.message}`;
+                
+                // Show error visually on canvas
+                patchCtx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+                patchCtx.fillRect(0, 0, patchCanvas.width, patchCanvas.height);
+                patchCtx.fillStyle = 'white';
+                patchCtx.font = '20px Arial';
+                patchCtx.textAlign = 'center';
+                patchCtx.fillText('Decode Error', patchCanvas.width/2, patchCanvas.height/2);
+            }
+        }
+
+        // --- 5. BANDWIDTH THROTTLING ---
+        setBitrateButton.onclick = setBandwidth;
+        function setBandwidth() {
+            if (!videoSender) return;
+            const bitrate = parseInt(bitrateInput.value) * 1000;
+            if (isNaN(bitrate) || bitrate <= 0) return;
+            const parameters = videoSender.getParameters();
+            if (!parameters.encodings) parameters.encodings = [{}];
+            parameters.encodings[0].maxBitrate = bitrate;
+            videoSender.setParameters(parameters)
+                .then(() => statusDiv.innerText = `Bitrate set to ${bitrate/1000} Kbps.`)
+                .catch(e => console.error('Error setting bitrate:', e));
+        }
+    </script>
+</body>
+</html>

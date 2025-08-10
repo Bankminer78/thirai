@@ -5,7 +5,8 @@
 
 # Keep this file
 !.gitignore
-
+*.DS_Store
+stuff/
 *.bin
 *.json
 runner

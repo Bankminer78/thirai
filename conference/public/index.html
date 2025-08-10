@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Thirai Conference</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Thirai Conference</h1>
+      <div class="controls">
+        <input id="name" type="text" placeholder="Your name" />
+        <button id="join">Join</button>
+        <button id="leave" disabled>Leave</button>
+      </div>
+      <div class="status">
+        <span id="status-text">Disconnected</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="videos">
+        <div class="video-col">
+          <h2>Local</h2>
+          <video id="localVideo" autoplay playsinline muted></video>
+        </div>
+        <div class="video-col">
+          <h2>Remote</h2>
+          <div id="remotes" class="remotes"></div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

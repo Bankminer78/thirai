@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hackathon Video Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            padding-top: 75%; /* 4:3 Aspect Ratio */
+        }
+        .video-container video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 0.5rem;
+            background-color: #1a202c;
+        }
+        .local-video-container {
+            position: absolute;
+            bottom: 1rem;
+            right: 1rem;
+            width: 25%;
+            max-width: 200px;
+            border: 2px solid white;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
+
+    <div class="w-full max-w-4xl p-4">
+        <h1 class="text-3xl font-bold text-center mb-4">Video Demo w/ Bandwidth Control</h1>
+        <p id="status" class="text-center text-gray-400 mb-6">Status: Waiting to start...</p>
+
+        <div id="video-chat" class="hidden">
+            <!-- Main video grid -->
+            <div class="relative bg-gray-800 rounded-lg shadow-lg">
+                <div class="video-container">
+                    <video id="remoteVideo" autoplay playsinline></video>
+                </div>
+                <div class="local-video-container">
+                    <div class="video-container">
+                         <video id="localVideo" autoplay playsinline muted></video>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="mt-6 bg-gray-800 p-4 rounded-lg shadow-lg">
+                <h2 class="text-xl font-semibold mb-3">Controls</h2>
+                <div class="flex flex-wrap items-center justify-center gap-4">
+                    <button id="callButton" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
+                        Start Call
+                    </button>
+                    <!-- Bitrate input field -->
+                    <div class="flex items-center gap-2">
+                        <label for="bitrateInput" class="font-medium">Max Bitrate (Kbps):</label>
+                        <input type="number" id="bitrateInput" class="bg-gray-700 border border-gray-600 text-white text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2 w-28" value="500">
+                        <button id="setBitrateButton" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">Set</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="start-container" class="text-center">
+             <button id="startButton" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg text-lg transition-colors">
+                Enable Camera
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // IMPORTANT: Replace this with your own public server URL (e.g., from Replit)
+        const SIGNALING_SERVER_URL = 'https://e57023ff-b0b5-400b-8458-03ea0b8e6bd1-00-155a22aats1if.worf.replit.dev/';
+
+        // UI Elements
+        const startButton = document.getElementById('startButton');
+        const callButton = document.getElementById('callButton');
+        const bitrateInput = document.getElementById('bitrateInput');
+        const setBitrateButton = document.getElementById('setBitrateButton');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const statusDiv = document.getElementById('status');
+        const startContainer = document.getElementById('start-container');
+        const videoChatContainer = document.getElementById('video-chat');
+
+        // WebRTC variables
+        let localStream;
+        let peerConnection;
+        let videoSender;
+        const socket = io(SIGNALING_SERVER_URL);
+        const roomName = 'hackathon-room'; // A simple, fixed room name
+
+        // STUN servers
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // --- 1. Initialization and Starting the Camera ---
+
+        startButton.onclick = async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+                statusDiv.innerText = 'Camera enabled. Ready to call.';
+                startContainer.classList.add('hidden');
+                videoChatContainer.classList.remove('hidden');
+                socket.emit('join', roomName);
+            } catch (error) {
+                console.error('Error accessing media devices.', error);
+                statusDiv.innerText = 'Error: Could not access camera. Please check permissions.';
+            }
+        };
+
+        // --- 2. Signaling Logic (using Socket.IO) ---
+
+        socket.on('connect', () => {
+            statusDiv.innerText = 'Connected to signaling server.';
+        });
+
+        socket.on('ready', () => {
+            if (localStream) {
+                statusDiv.innerText = 'Another user is ready. Creating peer connection.';
+                createPeerConnection();
+            }
+        });
+
+        socket.on('offer', async (offer) => {
+            if (!peerConnection) {
+                createPeerConnection();
+            }
+            statusDiv.innerText = 'Received offer. Setting remote description.';
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+
+            socket.emit('message', { type: 'answer', payload: answer });
+            statusDiv.innerText = 'Sent answer. Connection should establish soon.';
+        });
+
+        socket.on('answer', async (answer) => {
+            statusDiv.innerText = 'Received answer. Setting remote description.';
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        });
+
+        socket.on('candidate', (candidate) => {
+            peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        });
+        
+        // Simple message router on the client
+        socket.on('message', (message) => {
+            switch (message.type) {
+                case 'offer':
+                    // This logic is handled in the dedicated 'offer' event handler above
+                    break;
+                case 'answer':
+                    // This logic is handled in the dedicated 'answer' event handler above
+                    break;
+                case 'candidate':
+                    // This logic is handled in the dedicated 'candidate' event handler above
+                    break;
+            }
+        });
+
+
+        // --- 3. WebRTC Core Logic ---
+
+        callButton.onclick = async () => {
+            statusDiv.innerText = 'Starting call... Creating offer.';
+            if (!peerConnection) {
+                createPeerConnection();
+            }
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            socket.emit('message', { type: 'offer', payload: offer });
+            statusDiv.innerText = 'Offer sent. Waiting for an answer.';
+        };
+
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            localStream.getTracks().forEach(track => {
+                if (track.kind === 'video') {
+                    videoSender = peerConnection.addTrack(track, localStream);
+                } else {
+                    peerConnection.addTrack(track, localStream);
+                }
+            });
+
+            setBandwidth(); // Set the initial bitrate from the input field
+
+            peerConnection.ontrack = (event) => {
+                remoteVideo.srcObject = event.streams[0];
+                statusDiv.innerText = 'Connection established!';
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('message', { type: 'candidate', payload: event.candidate });
+                }
+            };
+        }
+
+        // --- 4. BANDWIDTH THROTTLING ---
+
+        setBitrateButton.onclick = setBandwidth; // Set bandwidth when the button is clicked
+
+        function setBandwidth() {
+            if (!videoSender) {
+                return;
+            }
+            
+            const bitrateKbps = parseInt(bitrateInput.value);
+            if (isNaN(bitrateKbps) || bitrateKbps <= 0) {
+                statusDiv.innerText = 'Please enter a valid positive number for bitrate.';
+                return;
+            }
+
+            // Convert Kbps to bps for the API
+            const bitrate = bitrateKbps * 1000;
+
+            statusDiv.innerText = `Setting max bitrate to ${bitrateKbps} Kbps...`;
+
+            const parameters = videoSender.getParameters();
+            if (!parameters.encodings || parameters.encodings.length === 0) {
+                parameters.encodings = [{}];
+            }
+            parameters.encodings[0].maxBitrate = bitrate;
+
+            videoSender.setParameters(parameters)
+                .then(() => {
+                    statusDiv.innerText = `Max bitrate is now ${bitrateKbps} Kbps.`;
+                    console.log(`Successfully set max bitrate to ${bitrate}`);
+                })
+                .catch(e => {
+                    statusDiv.innerText = `Error setting bitrate.`;
+                    console.error('Error setting bitrate:', e)
+                });
+        }
+    </script>
+</body>
+</html>
