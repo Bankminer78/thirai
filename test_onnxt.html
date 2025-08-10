@@ -1,0 +1,286 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>SDXL VAE Decoder (WebGPU) — Drag & Drop Latent</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 920px; margin: 24px auto; }
+  .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #drop {
+    border: 2px dashed #888; border-radius: 10px; padding: 24px; text-align: center; margin: 14px 0;
+  }
+  #cv { border: 1px solid #ccc; border-radius: 6px; image-rendering: auto; }
+  #log { white-space: pre-wrap; background: #111; color: #ddd; padding: 12px; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  label { font-size: 14px; }
+  #downloadBtn { margin-top: 10px; padding: 8px 16px; background: #007acc; color: white; border: none; border-radius: 4px; cursor: pointer; }
+  #downloadBtn:hover { background: #005a9e; }
+</style>
+
+<h1>SDXL VAE Decoder (WebGPU) — Drag & Drop Latent</h1>
+
+<div class="row">
+  <label>Model URL:
+    <input id="modelUrl" size="42" value="sdxl_vae_decoder_fp32.onnx"/>
+  </label>
+  <label>EP:
+    <select id="ep">
+      <option value="wasm">wasm (stable)</option>
+      <option value="webgpu" selected>webgpu (faster)</option>
+    </select>
+  </label>
+  <label>Latent dtype:
+    <select id="dtype">
+      <option value="float16" selected>float16 (Uint16 blob)</option>
+      <option value="float32">float32</option>
+    </select>
+  </label>
+  <label>Assume square?
+    <input type="checkbox" id="square" checked />
+  </label>
+  <label>Target res (H=W):
+    <input id="res" type="number" value="384" min="64" step="8" style="width:80px"/>
+  </label>
+  <button id="loadBtn">Load model</button>
+</div>
+
+<div class="row">
+  <label>Upload latent file:
+    <input type="file" id="fileInput" accept=".bin" />
+  </label>
+  <button id="processBtn" disabled>Process Latent</button>
+  <button id="benchmarkBtn" disabled>Benchmark (5x)</button>
+</div>
+<canvas id="cv" width="384" height="384"></canvas>
+<button id="downloadBtn" style="display:none;">Download PNG</button>
+
+<h3>Log</h3>
+<pre id="log"></pre>
+
+<script type="module">
+/** Robust ORT loader with ESM -> UMD fallbacks (jsDelivr -> unpkg -> local) **/
+let session = null; let IS = null, ENV = null, Tensor = null;
+
+const logEl = document.getElementById('log');
+const cv = document.getElementById('cv');
+let br = null; // bitmaprenderer context cache
+
+function log(...args){ logEl.textContent += args.join(' ') + '\n'; console.log(...args); }
+function setCanvasSize(w,h){
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  if (!br) br = cv.getContext('bitmaprenderer');
+}
+function guessHWFromLen(nelems, channels=4){
+  const spatial = nelems / channels;
+  const side = Math.round(Math.sqrt(spatial));
+  if (side * side * channels !== nelems) return null;
+  return { H8: side, W8: side, H: side*8, W: side*8 };
+}
+function loadScript(src){
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.async = true; s.crossOrigin = 'anonymous';
+    s.onload = resolve; s.onerror = () => reject(new Error('script load failed: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+// --- ESM -> UMD fallback loaders ---
+async function loadOrtWebGPU() {
+  // Quick feature sniff before loading ORT
+  if (!('gpu' in navigator)) throw new Error('WebGPU not available in this browser');
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('No WebGPU adapter found');
+  // Some browsers don't expose requestAdapterInfo; ORT 1.18 may rely on it.
+  if (typeof adapter.requestAdapterInfo !== 'function') {
+    throw new Error('WebGPU adapter lacks requestAdapterInfo(); fallback to WASM');
+  }
+
+  // 1) ESM (preferred) — ONNX Runtime doesn't publish .mjs files, skip ESM
+  log('Skipping ESM imports - ONNX Runtime uses UMD builds');
+
+  // 2) UMD globals (script tag) - Use working version
+  try {
+    await loadScript('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.webgpu.min.js');
+    return { IS: window.ort.InferenceSession, ENV: window.ort.env, Tensor: window.ort.Tensor, source: 'umd-jsdelivr-1.17.1' };
+  } catch(e) { log('UMD load failed (webgpu, jsDelivr 1.17.1):', e.message || e); }
+  try {
+    await loadScript('https://unpkg.com/onnxruntime-web@1.17.1/dist/ort.webgpu.min.js');
+    return { IS: window.ort.InferenceSession, ENV: window.ort.env, Tensor: window.ort.Tensor, source: 'umd-unpkg-1.17.1' };
+  } catch(e) { log('UMD load failed (webgpu, unpkg 1.17.1):', e.message || e); }
+
+  // 3) Local fallback (place file next to HTML if needed)
+  try {
+    await loadScript('./ort.webgpu.min.js');
+    return { IS: window.ort.InferenceSession, ENV: window.ort.env, Tensor: window.ort.Tensor, source: 'umd-local' };
+  } catch(e) { log('UMD load failed (webgpu, local):', e.message || e); }
+
+  throw new Error('Unable to load onnxruntime-web (WebGPU build)');
+}
+
+async function loadOrtWasm() {
+  // 1) ESM - Skip, ONNX Runtime doesn't publish .mjs files
+  log('Skipping ESM imports - ONNX Runtime uses UMD builds');
+
+  // 2) UMD globals - Use proven version
+  try {
+    await loadScript('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js');
+    return { IS: window.ort.InferenceSession, ENV: window.ort.env, Tensor: window.ort.Tensor, source: 'umd-jsdelivr-1.17.1' };
+  } catch(e) { log('UMD load failed (wasm, jsDelivr 1.17.1):', e.message || e); }
+  try {
+    await loadScript('https://unpkg.com/onnxruntime-web@1.17.1/dist/ort.min.js');
+    return { IS: window.ort.InferenceSession, ENV: window.ort.env, Tensor: window.ort.Tensor, source: 'umd-unpkg-1.17.1' };
+  } catch(e) { log('UMD load failed (wasm, unpkg 1.17.1):', e.message || e); }
+
+  // 3) Local fallback
+  try {
+    await loadScript('./ort.min.js');
+    return { IS: window.ort.InferenceSession, ENV: window.ort.env, Tensor: window.ort.Tensor, source: 'umd-local' };
+  } catch(e) { log('UMD load failed (wasm, local):', e.message || e); }
+
+  throw new Error('Unable to load onnxruntime-web (WASM build)');
+}
+
+async function loadSession(){
+  const modelUrl = document.getElementById('modelUrl').value.trim();
+  let ep = document.getElementById('ep').value;
+
+  let mod = null;
+
+  // Try WebGPU if selected; otherwise go straight to WASM
+  if (ep === 'webgpu') {
+    try {
+      mod = await loadOrtWebGPU();
+      IS = mod.IS; ENV = mod.ENV; Tensor = mod.Tensor;
+      log('ORT source:', mod.source);
+      if (ENV?.webgpu?.init) await ENV.webgpu.init();
+
+      try {
+        session = await IS.create(modelUrl, { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
+      } catch (e) {
+        log('WebGPU session create failed, falling back to WASM:', e.message || e);
+        ep = 'wasm'; mod = null;
+      }
+    } catch (e) {
+      log('WebGPU load failed, falling back to WASM:', e.message || e);
+      ep = 'wasm'; mod = null;
+    }
+  }
+
+  if (ep === 'wasm') {
+    mod = await loadOrtWasm();
+    IS = mod.IS; ENV = mod.ENV; Tensor = mod.Tensor;
+    log('ORT source:', mod.source);
+    if (ENV?.wasm) {
+      ENV.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/';
+      ENV.wasm.simd = true;
+      ENV.wasm.numThreads = 1; // avoid crossOriginIsolation warning
+    }
+    session = await IS.create(modelUrl, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+  }
+
+  // Warm-up (2 quick runs)
+  const dummy = new Tensor('float32', new Float32Array(4*48*48), [1,4,48,48]);
+  await session.run({ z_scaled: dummy });
+  await session.run({ z_scaled: dummy });
+  log('Provider:', session.executionProvider);
+}
+
+document.getElementById('loadBtn').onclick = () =>
+  loadSession().catch(e => log('Model load error:', e.message || e));
+// auto-load once
+loadSession().catch(e => log('Model load error:', e.message || e));
+
+// --- fast decode path (no extra conversion, preallocated RGBA, bitmaprenderer) ---
+const cache = { rgba:null, plane:0, W:0, H:0 };
+
+async function decodeLatent(buffer){
+  if (!session) throw new Error('Model not loaded');
+  const dtype = document.getElementById('dtype').value;
+  const targetRes = parseInt(document.getElementById('res').value, 10) || 384;
+
+  let H, W, H8, W8, tensor;
+  if (dtype === 'float16') {
+    const u16 = new Uint16Array(buffer);
+    const guess = guessHWFromLen(u16.length);
+    if (guess){ ({H8,W8,H,W} = guess); } else { H=W=targetRes; H8=H/8|0; W8=W/8|0; }
+    if (u16.length !== 4*H8*W8) throw new Error(`latent size mismatch: got ${u16.length}, expected ${4*H8*W8}`);
+    tensor = new Tensor('float16', u16, [1,4,H8,W8]);
+  } else {
+    const f32 = new Float32Array(buffer);
+    const guess = guessHWFromLen(f32.length);
+    if (guess){ ({H8,W8,H,W} = guess); } else { H=W=targetRes; H8=H/8|0; W8=W/8|0; }
+    if (f32.length !== 4*H8*W8) throw new Error(`latent size mismatch: got ${f32.length}, expected ${4*H8*W8}`);
+    tensor = new Tensor('float32', f32, [1,4,H8,W8]);
+  }
+
+  const t0 = performance.now();
+  const out = await session.run({ z_scaled: tensor });   // y in [-1,1], [1,3,H,W]
+  const t1 = performance.now();
+  const y = out.y, plane = H*W, data = y.data;
+
+  // Preallocate and reuse RGBA buffer
+  if (cache.W !== W || cache.H !== H) {
+    cache.W = W; cache.H = H; cache.plane = plane;
+    cache.rgba = new Uint8ClampedArray(plane*4);
+  }
+  const rgba = cache.rgba;
+
+  // Pack planar RGB -> interleaved RGBA (tight loop)
+  for (let px=0, i=0; px<plane; px++, i+=4) {
+    let r=(data[px]           +1)*127.5;
+    let g=(data[px + plane]   +1)*127.5;
+    let b=(data[px + plane*2] +1)*127.5;
+    rgba[i  ] = r<0?0:r>255?255:r|0;
+    rgba[i+1] = g<0?0:g>255?255:g|0;
+    rgba[i+2] = b<0?0:b>255?255:b|0;
+    rgba[i+3] = 255;
+  }
+
+  setCanvasSize(W,H);
+  const imgData = new ImageData(rgba, W, H);
+  const bm = await createImageBitmap(imgData);
+  br.transferFromImageBitmap(bm);
+
+  log(`decode ${(t1 - t0).toFixed(2)} ms | output ${W}x${H}`);
+}
+
+// UI wiring
+const fileInput     = document.getElementById('fileInput');
+const processBtn    = document.getElementById('processBtn');
+const benchmarkBtn  = document.getElementById('benchmarkBtn');
+const downloadBtn   = document.getElementById('downloadBtn');
+
+let selectedFile = null;
+
+fileInput.addEventListener('change', e => {
+  selectedFile = e.target.files[0] || null;
+  processBtn.disabled   = !selectedFile;
+  benchmarkBtn.disabled = !selectedFile;
+  if (selectedFile) log(`File: ${selectedFile.name} (${selectedFile.size} bytes)`);
+});
+
+processBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  const buf = await selectedFile.arrayBuffer();
+  await decodeLatent(buf);
+  downloadBtn.style.display = 'inline-block';
+});
+
+benchmarkBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  const buf = await selectedFile.arrayBuffer();
+  const times = [];
+  for (let i=0;i<5;i++){
+    const s = performance.now();
+    await decodeLatent(buf);
+    times.push(performance.now() - s);
+  }
+  const avg = times.reduce((a,b)=>a+b,0)/times.length;
+  log(`BENCH: avg ${avg.toFixed(2)} ms | best ${Math.min(...times).toFixed(2)} | worst ${Math.max(...times).toFixed(2)} | provider ${session.executionProvider}`);
+});
+
+downloadBtn.addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.download = 'decoded_image.png';
+  a.href = cv.toDataURL('image/png');
+  a.click();
+});
+</script>

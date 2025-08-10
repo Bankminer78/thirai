@@ -1,10 +1,15 @@
 # export_coreml_decoder.py (ensure FP32 first)
+import argparse
 import torch, coremltools as ct
 import numpy as np
 from torch import nn
 from diffusers import AutoencoderKL
 
-H = W = 384
+ap = argparse.ArgumentParser()
+ap.add_argument("--size", type=int, default=384, help="Output resolution H=W")
+args = ap.parse_args()
+
+H = W = int(args.size)
 vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae", torch_dtype=torch.float32).eval()
 scale = float(vae.config.scaling_factor)
 
@@ -30,7 +35,7 @@ ml = ct.convert(
     minimum_deployment_target=ct.target.macOS14,
     compute_units=ct.ComputeUnit.ALL,
     inputs=[ct.TensorType(name="z_scaled", shape=(1,4,H//8,W//8), dtype=np.float32)],
-    compute_precision=ct.precision.FLOAT32,  # <- start FP32 to establish parity
+    compute_precision=ct.precision.FLOAT16,  # start FP32 to establish parity
 )
 ml.save(f"sdxl_vae_decoder_{H}x{W}.mlpackage")
-print("saved decoder")
+print("saved decoder", f"sdxl_vae_decoder_{H}x{W}.mlpackage")

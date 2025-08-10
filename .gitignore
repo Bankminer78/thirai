@@ -1,13 +1,16 @@
 # Only track Python source files (and this .gitignore)
 # Ignore everything at root
-/*
-# Re-allow traversing into subdirectories
-!/**/
+
 # Allow Python files anywhere
-!**/*.py
+
 # Keep this file
 !.gitignore
 
+*.bin
+*.json
+runner
+vae_runner
+*.onnx
 .venv/
 venv/
 .venv-coreml311/
@@ -15,3 +18,7 @@ venv/
 myface_ds/
 node_modules
 output/
+
+*.mlpackage/
+build/
+*.pyc
