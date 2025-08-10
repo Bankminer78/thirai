@@ -347,17 +347,25 @@
             overlay.width = video.clientWidth;
             overlay.height = video.clientHeight;
             
-            // Draw patch indicator
+            // Draw patch indicator using SAME logic as capture
             const patchSize = 256;
-            const scaleX = video.clientWidth / (video.videoWidth || video.clientWidth);
-            const scaleY = video.clientHeight / (video.videoHeight || video.clientHeight);
+            const videoWidth = video.videoWidth || video.clientWidth;
+            const videoHeight = video.videoHeight || video.clientHeight;
             
-            const centerX = overlay.width / 2;
-            const centerY = overlay.height / 2;
-            const displayPatchSize = Math.min(patchSize * scaleX, patchSize * scaleY);
+            // Use IDENTICAL coordinate calculation as capture
+            const centerX = Math.floor(videoWidth / 2);
+            const centerY = Math.floor(videoHeight / 2);
+            const patchVideoX = centerX - patchSize / 2;
+            const patchVideoY = centerY - patchSize / 2;
             
-            const patchX = centerX - displayPatchSize / 2;
-            const patchY = centerY - displayPatchSize / 2;
+            // Scale to display coordinates
+            const scaleX = overlay.width / videoWidth;
+            const scaleY = overlay.height / videoHeight;
+            
+            const patchX = patchVideoX * scaleX;
+            const patchY = patchVideoY * scaleY;
+            const displayPatchWidth = patchSize * scaleX;
+            const displayPatchHeight = patchSize * scaleY;
             
             senderPatchCtx.clearRect(0, 0, overlay.width, overlay.height);
             
@@ -365,18 +373,21 @@
             senderPatchCtx.strokeStyle = '#00ff88';
             senderPatchCtx.lineWidth = 3;
             senderPatchCtx.setLineDash([10, 5]);
-            senderPatchCtx.strokeRect(patchX, patchY, displayPatchSize, displayPatchSize);
+            senderPatchCtx.strokeRect(patchX, patchY, displayPatchWidth, displayPatchHeight);
             
             // Add label
             senderPatchCtx.fillStyle = '#00ff88';
             senderPatchCtx.font = '14px Arial';
             senderPatchCtx.textAlign = 'center';
-            senderPatchCtx.fillText('SR Encoding Zone', centerX, patchY - 10);
+            senderPatchCtx.fillText('SR Encoding Zone', patchX + displayPatchWidth/2, patchY - 10);
             
             console.log('📦 [PATCH_OVERLAY] Patch overlay displayed:', {
-                display_size: `${Math.round(displayPatchSize)}x${Math.round(displayPatchSize)}`,
-                position: `(${Math.round(patchX)}, ${Math.round(patchY)})`,
-                video_size: `${video.clientWidth}x${video.clientHeight}`
+                video_coords: `(${patchVideoX}, ${patchVideoY})`,
+                display_coords: `(${Math.round(patchX)}, ${Math.round(patchY)})`,
+                display_size: `${Math.round(displayPatchWidth)}x${Math.round(displayPatchHeight)}`,
+                video_size: `${videoWidth}x${videoHeight}`,
+                canvas_size: `${video.clientWidth}x${video.clientHeight}`,
+                scale: `${scaleX.toFixed(2)}x${scaleY.toFixed(2)}`
             });
         }
         
@@ -552,37 +563,27 @@
                 patchCanvas.width = remoteVideo.clientWidth;
                 patchCanvas.height = remoteVideo.clientHeight;
                 
-                // Calculate where the 256x256 patch should be positioned on the canvas
-                const videoWidth = remoteVideo.videoWidth || remoteVideo.clientWidth;
-                const videoHeight = remoteVideo.videoHeight || remoteVideo.clientHeight;
+                // The decoded patch is already 256x256 - we just need to position it correctly
+                // Calculate where to place the 256x256 patch on the canvas
+                const patchSize = 256; // This is the ACTUAL size of the decoded image
                 
-                // Scale from video coordinates to canvas coordinates
-                const scaleX = patchCanvas.width / videoWidth;
-                const scaleY = patchCanvas.height / videoHeight;
+                // Position the patch at the center of the canvas (matching sender's relative position)
+                const patchCanvasX = (patchCanvas.width - patchSize) / 2;
+                const patchCanvasY = (patchCanvas.height - patchSize) / 2;
                 
-                // Calculate patch position (center of video)
-                const patchSize = 256;
-                const videoCenterX = videoWidth / 2;
-                const videoCenterY = videoHeight / 2;
-                const patchVideoX = videoCenterX - patchSize / 2;
-                const patchVideoY = videoCenterY - patchSize / 2;
-                
-                // Convert to canvas coordinates
-                const patchCanvasX = patchVideoX * scaleX;
-                const patchCanvasY = patchVideoY * scaleY;
-                const patchCanvasWidth = patchSize * scaleX;
-                const patchCanvasHeight = patchSize * scaleY;
+                // The patch keeps its native 256x256 size - no scaling needed!
+                const patchCanvasWidth = patchSize;
+                const patchCanvasHeight = patchSize;
                 
                 console.log('🖼️ [RECEIVER] Patching decoded image:', {
-                    video_size: `${videoWidth}x${videoHeight}`,
                     canvas_size: `${patchCanvas.width}x${patchCanvas.height}`,
-                    patch_video_coords: `(${Math.round(patchVideoX)}, ${Math.round(patchVideoY)})`,
                     patch_canvas_coords: `(${Math.round(patchCanvasX)}, ${Math.round(patchCanvasY)})`,
                     patch_canvas_size: `${Math.round(patchCanvasWidth)}x${Math.round(patchCanvasHeight)}`,
-                    scale: `${scaleX.toFixed(2)}x${scaleY.toFixed(2)}`
+                    approach: 'native 256x256 patch, centered positioning'
                 });
                 
-                // First draw the original video frame as background\n                patchCtx.drawImage(remoteVideo, 0, 0, patchCanvas.width, patchCanvas.height);
+                // First draw the original video frame as background
+                patchCtx.drawImage(remoteVideo, 0, 0, patchCanvas.width, patchCanvas.height);
                 
                 // Then draw the decoded patch over the specific area
                 patchCtx.drawImage(
