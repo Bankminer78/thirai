@@ -71,6 +71,7 @@
                 <div class="video-wrapper">
                     <video id="remoteVideo" autoplay playsinline></video>
                     <canvas id="patchCanvas"></canvas> <!-- Canvas for patching SR frames -->
+                    <canvas id="facePatchCanvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 8;"></canvas> <!-- Canvas for face patches -->
                 </div>
                 <div class="local-video-container">
                     <div class="video-wrapper">
@@ -123,6 +124,13 @@
                         <span class="font-medium">Face Detection:</span>
                         <label class="switch">
                             <input type="checkbox" id="faceDetectionToggle">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="font-medium">Face Patches:</span>
+                        <label class="switch">
+                            <input type="checkbox" id="facePatchToggle">
                             <span class="slider"></span>
                         </label>
                     </div>
@@ -186,9 +194,12 @@
         const patchZoomValue = document.getElementById('patchZoomValue');
         const blockyToggle = document.getElementById('blockyToggle');
         const faceDetectionToggle = document.getElementById('faceDetectionToggle');
+        const facePatchToggle = document.getElementById('facePatchToggle');
         const captureCanvas = document.getElementById('captureCanvas');
         const faceDetectionCanvas = document.getElementById('faceDetectionCanvas');
         const faceDetectionCtx = faceDetectionCanvas.getContext('2d');
+        
+        // Face patch canvas will be initialized lazily when needed
         
         // Bitrate monitoring elements
         const videoBitrateDiv = document.getElementById('videoBitrate');
@@ -212,6 +223,10 @@
         let currentSRFPS = 1.0; // Dynamic SR FPS
         let currentPatchZoom = 1.0; // Dynamic patch zoom factor
         
+        // Face patch variables (declare early to avoid temporal dead zone)
+        let facePatchCanvas = null; // Canvas for rendering received face patches
+        let facePatchCtx = null; // Context for face patch canvas
+        
         // Enhanced bitrate tracking variables
         let bitrateMonitorInterval = null;
         let lastVideoBytesSent = 0;
@@ -227,6 +242,9 @@
         let lastSRPatchPosition = null; // Store patch position
         let srSessionActive = false; // Track if SR is currently active
         let lastSRDataTime = 0; // Timestamp of last SR data received
+        let facePatchActive = false; // Track if face patch processing is active
+        let lastFacePatch = null; // Store the last received face patch
+        let lastFacePatchPosition = null; // Store face patch position
         const SR_TIMEOUT = 3000; // 3 seconds timeout for SR session
         
         // MediaPipe Face Detection variables
@@ -720,6 +738,16 @@
                 return;
             }
             
+            if (message.type === 'face_patch_control') {
+                handleFacePatchControlMessage(message);
+                return;
+            }
+            
+            if (message.type === 'face_patch') {
+                handleFacePatchMessage(message);
+                return;
+            }
+            
             // Handle SR latent data (legacy format without type field)
             const latentMessage = message;
             
@@ -894,6 +922,99 @@
                 console.log('🧹 [PATCH_CANVAS] Canvas cleared');
             }
         }
+
+        function handleFacePatchControlMessage(message) {
+            console.log('🎭 [FACE_PATCH_CONTROL] Received control message:', message);
+            
+            if (message.action === 'start') {
+                facePatchActive = true;
+                console.log('✅ [FACE_PATCH_SESSION] Face patch session STARTED');
+                
+            } else if (message.action === 'stop') {
+                facePatchActive = false;
+                
+                // Clear stored face patches
+                lastFacePatch = null;
+                lastFacePatchPosition = null;
+                
+                // Clear face patch canvas
+                if (!facePatchCanvas) {
+                    facePatchCanvas = document.getElementById('facePatchCanvas');
+                    if (facePatchCanvas) {
+                        facePatchCtx = facePatchCanvas.getContext('2d');
+                    }
+                }
+                if (facePatchCtx) {
+                    facePatchCtx.clearRect(0, 0, facePatchCanvas.width, facePatchCanvas.height);
+                }
+                
+                console.log('🔴 [FACE_PATCH_SESSION] Face patch session STOPPED - cleared face patches');
+            }
+        }
+
+        async function handleFacePatchMessage(message) {
+            if (!facePatchActive) {
+                console.log('⚠️ [FACE_PATCH] Face patches disabled, ignoring message');
+                return;
+            }
+
+            // Ensure face patch canvas is initialized
+            if (!facePatchCanvas) {
+                facePatchCanvas = document.getElementById('facePatchCanvas');
+                if (facePatchCanvas) {
+                    facePatchCtx = facePatchCanvas.getContext('2d');
+                } else {
+                    console.error('❌ [FACE_PATCH] Face patch canvas not found');
+                    return;
+                }
+            }
+
+            console.log('🎭 [FACE_PATCH] Received face patch:', {
+                face_patch_b64_length: message.face_patch_b64?.length || 0,
+                original_position: message.original_position,
+                patch_size: message.patch_size,
+                confidence: message.confidence
+            });
+
+            try {
+                // Convert base64 to image and display
+                const imageBlob = await fetch(`data:image/jpeg;base64,${message.face_patch_b64}`).then(r => r.blob());
+                const imageBitmap = await createImageBitmap(imageBlob);
+                
+                // Set up face patch canvas to match remote video
+                facePatchCanvas.width = remoteVideo.clientWidth;
+                facePatchCanvas.height = remoteVideo.clientHeight;
+                
+                // Clear previous face patches
+                facePatchCtx.clearRect(0, 0, facePatchCanvas.width, facePatchCanvas.height);
+                
+                // Calculate face patch position on receiver canvas
+                const canvasX = message.original_position.x * facePatchCanvas.width;
+                const canvasY = message.original_position.y * facePatchCanvas.height;
+                const canvasWidth = message.original_position.width * facePatchCanvas.width;
+                const canvasHeight = message.original_position.height * facePatchCanvas.height;
+                
+                // Draw the face patch at the original position
+                facePatchCtx.drawImage(
+                    imageBitmap,
+                    canvasX, canvasY, canvasWidth, canvasHeight
+                );
+                
+                // Store for persistence
+                lastFacePatch = imageBitmap;
+                lastFacePatchPosition = {
+                    x: canvasX,
+                    y: canvasY,
+                    width: canvasWidth,
+                    height: canvasHeight
+                };
+                
+                console.log(`✅ [FACE_PATCH] Displayed face patch at (${canvasX.toFixed(0)}, ${canvasY.toFixed(0)}) size ${canvasWidth.toFixed(0)}x${canvasHeight.toFixed(0)}`);
+                
+            } catch (error) {
+                console.error('❌ [FACE_PATCH] Error displaying face patch:', error);
+            }
+        }
         
         // Check for SR session timeout
         function checkSRTimeout() {
@@ -950,6 +1071,11 @@
             
             if (faceDetectionActive) {
                 drawFaceDetectionOverlay();
+                
+                // Process face patches if we have faces and are in sender mode
+                if (detectedFaces.length > 0 && userRole === 'sender' && facePatchActive) {
+                    processFacePatches();
+                }
             }
         }
 
@@ -1045,6 +1171,93 @@
             console.log('🔍 [FACE_DETECTION] Stopped');
         }
 
+        async function processFacePatches() {
+            if (!dataChannel || dataChannel.readyState !== 'open') {
+                console.log('⚠️ [FACE_PATCH] Data channel not available, skipping face patch processing');
+                return;
+            }
+            
+            if (detectedFaces.length === 0) return;
+            
+            // Get video dimensions
+            const videoWidth = localVideo.videoWidth || localVideo.clientWidth;
+            const videoHeight = localVideo.videoHeight || localVideo.clientHeight;
+            
+            if (videoWidth === 0 || videoHeight === 0) {
+                console.log('⚠️ [FACE_PATCH] Video not ready, skipping face patch processing');
+                return;
+            }
+            
+            // Process the first detected face
+            const detection = detectedFaces[0];
+            const bbox = detection.boundingBox;
+            
+            // Convert normalized coordinates to video coordinates
+            const faceX = (bbox.xCenter - bbox.width / 2) * videoWidth;
+            const faceY = (bbox.yCenter - bbox.height / 2) * videoHeight;
+            const faceWidth = bbox.width * videoWidth;
+            const faceHeight = bbox.height * videoHeight;
+            
+            // Add padding around face (20% larger)
+            const padding = 0.2;
+            const paddedWidth = faceWidth * (1 + padding);
+            const paddedHeight = faceHeight * (1 + padding);
+            const paddedX = faceX - (paddedWidth - faceWidth) / 2;
+            const paddedY = faceY - (paddedHeight - faceHeight) / 2;
+            
+            // Ensure coordinates are within video bounds
+            const clampedX = Math.max(0, Math.min(paddedX, videoWidth - paddedWidth));
+            const clampedY = Math.max(0, Math.min(paddedY, videoHeight - paddedHeight));
+            const clampedWidth = Math.min(paddedWidth, videoWidth - clampedX);
+            const clampedHeight = Math.min(paddedHeight, videoHeight - clampedY);
+            
+            try {
+                // Create temporary canvas for extracting face patch
+                const tempCanvas = document.createElement('canvas');
+                const tempCtx = tempCanvas.getContext('2d');
+                
+                // Set patch size (similar to SR patches, use 256x256 for consistency)
+                const patchSize = 256;
+                tempCanvas.width = patchSize;
+                tempCanvas.height = patchSize;
+                
+                // Draw the face region to the canvas, scaling to fit patch size
+                tempCtx.drawImage(
+                    localVideo,
+                    clampedX, clampedY, clampedWidth, clampedHeight,  // source rectangle
+                    0, 0, patchSize, patchSize                        // destination rectangle
+                );
+                
+                // Convert to JPEG (with compression)
+                const jpegDataUrl = tempCanvas.toDataURL('image/jpeg', 0.8); // 80% quality
+                const jpegBase64 = jpegDataUrl.split(',')[1]; // Remove data URL prefix
+                
+                // Create face patch message
+                const facePatchMessage = {
+                    type: 'face_patch',
+                    face_patch_b64: jpegBase64,
+                    original_position: {
+                        x: clampedX / videoWidth,        // normalized coordinates
+                        y: clampedY / videoHeight,
+                        width: clampedWidth / videoWidth,
+                        height: clampedHeight / videoHeight
+                    },
+                    patch_size: patchSize,
+                    timestamp: Date.now(),
+                    confidence: detection.score
+                };
+                
+                // Send via data channel
+                const messageStr = JSON.stringify(facePatchMessage);
+                dataChannel.send(messageStr);
+                
+                console.log(`🎭 [FACE_PATCH] Sent face patch: ${clampedWidth.toFixed(0)}x${clampedHeight.toFixed(0)} at (${clampedX.toFixed(0)}, ${clampedY.toFixed(0)}) confidence: ${(detection.score * 100).toFixed(0)}%`);
+                
+            } catch (error) {
+                console.error('❌ [FACE_PATCH] Error processing face patch:', error);
+            }
+        }
+
         // --- 5. BANDWIDTH THROTTLING ---
         setBitrateButton.onclick = setBandwidth;
         function setBandwidth() {
@@ -1088,6 +1301,48 @@
                 startFaceDetection();
             } else {
                 stopFaceDetection();
+            }
+        });
+        
+        // --- FACE PATCH CONTROL ---
+        facePatchToggle.addEventListener('change', () => {
+            console.log(`🎭 [FACE_PATCH] Face patches: ${facePatchToggle.checked ? 'ON' : 'OFF'}`);
+            
+            facePatchActive = facePatchToggle.checked;
+            
+            if (!facePatchActive) {
+                // Clear face patches when turned off
+                if (!facePatchCanvas) {
+                    facePatchCanvas = document.getElementById('facePatchCanvas');
+                    if (facePatchCanvas) {
+                        facePatchCtx = facePatchCanvas.getContext('2d');
+                    }
+                }
+                if (facePatchCtx) {
+                    facePatchCtx.clearRect(0, 0, facePatchCanvas.width, facePatchCanvas.height);
+                }
+                lastFacePatch = null;
+                lastFacePatchPosition = null;
+                
+                // Send control message to stop face patches
+                if (dataChannel && dataChannel.readyState === 'open') {
+                    const controlMessage = {
+                        type: 'face_patch_control',
+                        action: 'stop',
+                        timestamp: Date.now()
+                    };
+                    dataChannel.send(JSON.stringify(controlMessage));
+                }
+            } else {
+                // Send control message to start face patches
+                if (dataChannel && dataChannel.readyState === 'open') {
+                    const controlMessage = {
+                        type: 'face_patch_control',
+                        action: 'start',
+                        timestamp: Date.now()
+                    };
+                    dataChannel.send(JSON.stringify(controlMessage));
+                }
             }
         });
         function updatePatchSize() {
